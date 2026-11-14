@@ -9,6 +9,8 @@
 | 开发模式 | **单人全栈开发**，所有选型以“一个人能长期维护”为第一约束 |
 | 目标区域 | 日本东京区域起步（覆盖 JP / KR / TW 延迟；中国大陆暂不首发） |
 
+> **（2026-11-14 结构调整，无接口变更）** 第 4 章“总体架构”扩写为 4.1～4.6：新增 mermaid 架构总图、分层与依赖方向、路由分组与鉴权、三条关键链路时序图、子系统解耦说明；第 5 章“项目目录结构”改为 `handler / service / repository / model / middleware / task / platform / pkg` 的经典分层（api 与 worker 共用 service、repository、model，仅入口层不同）。原按业务域分包（`internal/auth`、`internal/invite` 等）的结构作废；已实现代码需按新结构迁移。
+>
 > **V1.2 变更说明**：对齐 PRD v1.4，并修正 V1.1 的几处设计缺陷。① **新增房主管理**（新增 7.8 节）：房主可移除成员、解散小屋、自助补码，房主不可退出自己的小屋；对应新增 `room_bans` 表、`room_members.left_reason`、`invite_codes.source=owner_regen`，第 8 章新增 3 个接口与 `ROOM_LIMIT`/`NOT_ROOM_OWNER`/`OWNER_CANNOT_LEAVE`/`CODE_ISSUE_LIMIT` 四个错误码，第 9 章新增 `room.kicked` 事件、`member.left` 增加 `reason` 字段。② **入房事务（7.2）补全**：V1.1 只写了规则、没落实到事务步骤——新增用户行锁（否则同一用户并发用两个码入房会突破"最多 2 间房"）、禁用自己的码、`room_bans` 黑名单校验、未成年人双向隔离（成年人也不能进含未成年成员的房间）；并定下全局统一加锁顺序 `users → invite_codes → rooms → room_members`，防止入房与解散并发时死锁。③ 奖励码数量改为 `min(配置值, 自己小屋空位数 − 现有未用有效码数)`，终身上限 20 的口径改为除种子码外所有来源累计，新增环境变量 `OWNER_REGEN_DAILY_LIMIT`。④ **`messages` MVP 不分区**：PostgreSQL 分区表的主键和唯一索引必须包含分区键 `created_at`，V1.1 的"按月分区"会让 `(sender_id, client_msg_id)` 无法全局唯一、重发幂等失效；单库 200 QPS 写入不分区足够，靠 30 天清理任务控制体积，第 1.2、3、6.1、18.3 节同步。⑤ 新增 Widget 刷新用的 data-only 推送 `widget.refresh`，`devices` 表新增 `widget_installed`（7.7）：V1.1 前端依赖静默推送刷新 Widget，后端却未定义。⑥ **纯本地运行说明**（15.1、15.5）：当前没有云端预算，仅本地开发与测试；补充依赖服务的两种运行方式（Docker Desktop / 原生安装）及 Windows 下用 go-task 替代 make。第 16 章测试与第 17 章排期同步。5.x 的整体架构、第 10 章 AI 网关、第 11~12 章 Redis 与稳定性设计不变。**（2026-11-14 补充，无接口变更）** 7.1 新增“账号状态与前后顺序”表：登录只建空 `users` 行，小屋与 signup 码只在 onboarding 事务里创建；并约定未完成 onboarding 的用户入房返回 `ONBOARDING_REQUIRED`（B3 实现，尚未列入第 8 章错误码清单）。
 >
 > **V1.1 变更说明**：暂不首发中国大陆；补充强制更新接口（`UPGRADE_REQUIRED`（HTTP 426）、WebSocket `hello.min_app_version`）。
@@ -89,72 +91,359 @@
 
 ## 4. 总体架构
 
-```
-  Flutter App ──HTTPS/REST──┐
-  Flutter App ──WSS─────────┤
-                            ▼
-                   Caddy（TLS、反向代理）
-                            ▼
-        ┌──────────────────────────────────────────┐
-        │  api 进程（cmd/api）                     │
-        │  Gin REST · WS Hub · 鉴权/限流中间件     │
-        │  订阅 Redis 频道 ws:events → 本机连接    │
-        └───────┬───────────────────┬──────────────┘
-                │                   │ enqueue
-         PostgreSQL              Redis ◄───────────┐
-    （业务数据、消息分区表）  （缓存/限流/presence/      │
-                              Pub/Sub/asynq 队列）     │
-                                    │ dequeue         │
-        ┌───────────────────────────▼────────────┐   │
-        │  worker 进程（cmd/worker）              │───┘ publish
-        │  翻译/润色任务 · 推送 · 定时清理         │
-        │  AI 网关：缓存→限流→熔断→供应商链         │
-        └───────┬───────────────┬────────────────┘
-                ▼               ▼
-          LLM 供应商 A/B     机翻服务（兜底）
-          FCM（推送）         内容审核 API
+### 4.1 系统总览
+
+```mermaid
+flowchart TB
+    subgraph Clients["客户端"]
+        AppRest["Flutter App\nREST / HTTPS"]
+        AppWs["Flutter App\nWebSocket / WSS"]
+    end
+
+    Caddy["Caddy\nTLS 终止 · 反向代理 · WS Upgrade 透传"]
+
+    subgraph ApiProc["api 进程（cmd/api）"]
+        direction TB
+        MW["Middleware 层\n版本检查(426) · 请求ID · 日志 · Recovery\n鉴权 · 限流 · onboarding 校验"]
+        Handler["Handler 层\nREST 接口 + ws_handler（HTTP→WS 升级）"]
+        Service["Service 层\nauth · user · invite · room · chat · checkin · safety\nmoderation · hub · presence"]
+        Repo["Repository 层\n（pgx + sqlc，唯一访问 PostgreSQL 的地方）"]
+        Hub["WS Hub（hub_service）\n本机连接池 · 订阅 ws:events 后只推本机连接"]
+    end
+
+    subgraph WorkerProc["worker 进程（cmd/worker）"]
+        direction TB
+        Tasks["Task 层（asynq 消费者）\ntranslate · polish · push · cleanup\n+ Scheduler 定时任务"]
+        WService["Service 层（与 api 同一份代码）\nai_service（AI 网关）· push_service · moderation"]
+        WRepo["Repository 层"]
+    end
+
+    subgraph Storage["存储"]
+        PG[("PostgreSQL 16\n业务数据 · messages · 行锁事务")]
+        Redis[("Redis 7\n缓存 · 限流 · presence\nPub/Sub · Stream · asynq 队列")]
+    end
+
+    subgraph External["外部依赖"]
+        LLM["LLM 供应商 A / B"]
+        MT["机器翻译（兜底）"]
+        FCM["FCM（iOS 经 APNs）"]
+        ModAPI["内容审核 API"]
+        IDP["Apple / Google\nID Token 校验"]
+        S3["S3 兼容存储 + CDN"]
+    end
+
+    AppRest --> Caddy
+    AppWs --> Caddy
+    Caddy --> MW
+    MW --> Handler
+    Handler --> Service
+    Service --> Repo
+    Repo --> PG
+    Service -->|"限流/缓存/presence"| Redis
+    Service -->|"enqueue 翻译/推送任务"| Redis
+    Service -->|"Publish 事件 → ws:events"| Redis
+    Redis -->|"Subscribe ws:events"| Hub
+    Hub -->|"推送给本机连接"| AppWs
+    Handler --> Hub
+    Service -->|"登录校验"| IDP
+
+    Redis -->|"dequeue"| Tasks
+    Tasks --> WService
+    WService --> WRepo --> PG
+    WService -->|"缓存/配额/熔断状态"| Redis
+    WService -->|"message.new 等事件 publish"| Redis
+    WService --> LLM
+    WService --> MT
+    WService --> FCM
+    WService --> ModAPI
+    Service -.->|"海报/美术资源"| S3
 ```
 
-**进程职责**
+**读图要点：**
 
-| 进程 | 职责 | 扩容方式 |
+- **api 与 worker 是同一代码库、同一镜像、不同启动参数**（`cmd/api` / `cmd/worker`），Service、Repository、Model 三层完全共用，只有入口层不同：api 的入口是 Handler，worker 的入口是 Task。
+- **api 进程不直接调用任何 AI / 推送供应商**：发消息的同步段只做校验、审核、幂等落库，然后把 `translate:{message_id}` 入队即返回，所有慢操作与外部调用都在 worker（对应原则 5「AI 一律可降级」）。
+- **事件走 Redis，不走进程内通信**：业务代码只调 `Publisher.Publish(event)`，事件写入 Redis 频道 `ws:events`，每个 api 节点订阅后只推给本机连接。worker 发布的 `message.new` 同样走这条路，所以 api 与 worker 之间没有任何直连。
+- **强一致逻辑只靠 PostgreSQL 事务**：验证码入房、房间满员等在 Repository 层的事务里用行锁解决，不引入分布式锁（原则 2）。
+
+### 4.2 进程职责
+
+| 进程 | 入口 | 职责 | 扩容方式 |
+| :-- | :-- | :-- | :-- |
+| api | `cmd/api` | REST、WebSocket 长连接、事件分发、同步校验与落库 | 加节点；因事件走 Redis Pub/Sub，节点之间无状态依赖 |
+| worker | `cmd/worker` | AI 翻译/润色、推送、定时任务（过期码清理、数据脱敏、统计汇总） | 调大 asynq 并发数或加节点，与 api 独立伸缩 |
+| tools | `cmd/tools/*` | 一次性命令行工具：`seedcodes`（零号用户种子码）、`backfill` 等；不参与线上常规请求 | 不扩容，手动运行 |
+
+### 4.3 分层架构与依赖方向
+
+```mermaid
+flowchart LR
+    Entry["入口层\ncmd/api · cmd/worker"]
+    MW["middleware\n鉴权 · 限流 · 版本检查"]
+    H["handler\nREST / WS 接入"]
+    T["task\nasynq 任务入口"]
+    S["service\n业务逻辑"]
+    R["repository\n数据访问"]
+    P["platform\ndb · redis · queue · storage · clock"]
+    M["model\n实体 · DTO · 事件帧 · 错误码"]
+    PK["pkg\nllm · mt · fcm · idtoken · wordfilter"]
+
+    Entry --> MW --> H --> S
+    Entry --> T --> S
+    S --> R --> P
+    S --> PK
+    MW -.->|"仅依赖 AuthService 接口"| S
+    H -.-> M
+    S -.-> M
+    R -.-> M
+```
+
+| 层 | 目录 | 职责 | 不允许做的事 |
+| :-- | :-- | :-- | :-- |
+| 入口 | `cmd/*` | 读配置、装配依赖、启动 HTTP 服务 / asynq 消费者 / 后台任务 | 不含业务逻辑 |
+| middleware | `internal/middleware` | 请求ID、日志、Recovery、版本检查（426）、JWT 鉴权、onboarding 校验、限流 | 不直接查库（鉴权通过 Service 接口） |
+| handler | `internal/handler` | 参数绑定与校验、调用 service、组装 `{data}` / `{error}` 响应、WS 升级 | 不含业务规则，不直接访问 Repository |
+| task | `internal/task` | asynq 任务处理函数与 Scheduler 定时任务；与 handler 同级，都只是 Service 的调用方 | 不含业务规则 |
+| service | `internal/service` | 核心业务逻辑：验证码入房、消息发送、AI 网关、打卡、举报屏蔽、事件发布；事务边界在这里划定 | 不写 SQL，不依赖 Gin |
+| repository | `internal/repository` | **唯一**访问 PostgreSQL 的地方，对上暴露 interface，便于单测 mock；跨表事务通过 `TxManager` 传入 | 不含业务规则 |
+| model | `internal/model` | 数据库实体、接口 DTO、WS 事件帧、业务错误码；不依赖任何其他层 | 不含逻辑 |
+| platform | `internal/platform` | 数据库连接池、Redis 客户端、asynq 队列、对象存储、时钟等基础设施 | 不含业务概念 |
+| pkg | `pkg/*` | 与业务无关、可复用的外部能力封装（LLM 供应商、机翻、FCM、Apple/Google ID Token 校验、敏感词自动机） | 不依赖 `internal/*` |
+
+**依赖规则（单向）：** `handler / task → service → repository → platform`；`model` 被所有层引用但自身不引用任何层；`middleware` 只依赖 `service` 里定义的接口（如 `AuthService.ValidateAccessToken`）；`service` 之间通过接口通信，禁止循环依赖，例如 `chat_service` 只依赖 `Translator`、`Publisher` 接口，不依赖具体的 `ai_service`。
+
+### 4.4 路由分组与鉴权
+
+| 分组 | 覆盖接口 | 中间件链 |
 | :-- | :-- | :-- |
-| api | REST、WebSocket 长连接、事件分发 | 加节点；因事件走 Redis Pub/Sub，节点之间无状态依赖 |
-| worker | AI 翻译/润色、推送、定时任务 | 调大 asynq 并发数或加节点，与 api 独立伸缩 |
+| 公开 | `POST /auth/login/apple`、`/auth/login/google`、`POST /auth/refresh`；健康检查 `/healthz`、`/readyz` | 版本检查 → 限流（按 IP） |
+| 登录即可（含未 onboarding） | `POST /auth/logout`、`GET /me`、`PATCH /me`、`POST /me/onboarding`、`PUT /devices/current`、`DELETE /me` | 版本检查 → `Auth()` |
+| 登录且已 onboarding | `/codes*`、`/rooms*`、`/deliveries*`、`/config/phrases`、`/reports`、`/blocks*`、`/widget/snapshot`、`GET /ws` | 版本检查 → `Auth()` → `RequireOnboarded()` → 限流（按用户） |
+| 房主专属（在上一组基础上） | `DELETE /rooms/{id}/members/{uid}`、`POST /rooms/{id}/dissolve`、`POST /rooms/{id}/codes` | 同上；房主身份由 `room_service` 在事务内校验，失败返回 `NOT_ROOM_OWNER` |
+
+- 分组依据来自 7.1 的“账号状态与前后顺序”：已登录但未 onboarding 的用户只能访问 `GET /me`、`POST /me/onboarding` 等少数接口，其余一律返回 `ONBOARDING_REQUIRED`【假设：该错误码随 B3 落地，届时补入第 8 章清单】。
+- `Auth()` 负责校验 access token 并把 `user_id` 写入请求上下文；`RequireOnboarded()` 读取用户 `onboarded_at`；版本检查在最外层，客户端版本低于 `min_app_version` 时直接返回 HTTP 426 `UPGRADE_REQUIRED`。
+- **WebSocket** 沿用 7.3：升级请求用 `Authorization` 头携带 access token，通过与 REST 相同的中间件链后才由 `ws_handler` 升级并注册进 Hub。
+
+### 4.5 三条关键链路（跨层调用示意）
+
+**① 验证码入房（强一致，全程在 api 进程、单个数据库事务内，详见 7.2）**
+
+```mermaid
+sequenceDiagram
+    participant C as Flutter App
+    participant MW as middleware
+    participant H as room_handler
+    participant S as invite_service / room_service
+    participant R as repository（TxManager）
+    participant PG as PostgreSQL
+    participant Pub as Publisher（Redis）
+
+    C->>MW: POST /rooms/join {code}
+    MW->>MW: 版本检查 → Auth → RequireOnboarded → 限流（按用户，防刷码）
+    MW->>H: 通过
+    H->>S: Join(userID, code)
+    S->>R: WithTx(fn) 开启事务
+    R->>PG: 按固定顺序加锁 users → invite_codes → rooms → room_members
+    S->>S: 校验：码有效、非自己的码、未被 ban、房间未满、≤2 间房、年龄规则
+    S->>R: 占码 · 写 room_members · member_count+1 · 发放奖励码（幂等）
+    R->>PG: COMMIT
+    S->>Pub: Publish member.joined（房间内成员）/ code.invalidated（房满时）
+    S-->>H: 房间详情
+    H-->>C: 200 {data}
+```
+
+**② 发送消息与 AI 信使（同步段在 api，异步段在 worker，详见 7.4）**
+
+```mermaid
+sequenceDiagram
+    participant C as Flutter App
+    participant H as chat_handler
+    participant S as chat_service
+    participant R as repository
+    participant Q as asynq（Redis）
+    participant T as task（worker）
+    participant AI as ai_service（AI 网关）
+    participant Pub as Publisher
+    participant Hub as hub_service（各 api 节点）
+
+    C->>H: POST /rooms/{id}/messages
+    H->>S: Send(...)
+    S->>S: 校验 · 本地词库前置审核
+    S->>R: 以 (sender_id, client_msg_id) 幂等写 messages
+    alt kind = phrase
+        S->>R: 取短语模板，直接写 deliveries
+        S->>Pub: Publish message.new（不调用 AI）
+    else 文本消息
+        S->>Q: enqueue translate:{message_id}
+        S-->>H: 202 + message_id
+    end
+    H-->>C: 响应
+
+    Q->>T: dequeue
+    T->>AI: 按目标语言分组翻译（缓存→限流→熔断→供应商链）
+    AI-->>T: 译文（失败则降级为机翻或原文）
+    T->>R: 写 deliveries · 后置审核
+    T->>Pub: Publish message.new
+    Pub->>Hub: Redis ws:events
+    Hub-->>C: WS message.new（含各自译文）
+    Note over T,Q: 接收者不在线 → 入队 push 任务 → FCM
+```
+
+**③ WebSocket 连接与断线重放（详见 7.3）**
+
+```mermaid
+sequenceDiagram
+    participant C as Flutter App
+    participant WH as ws_handler
+    participant Hub as hub_service
+    participant Pres as presence_service
+    participant Redis as Redis（Stream / Pub/Sub）
+
+    C->>WH: GET /ws（Authorization 头）
+    WH->>Hub: 注册连接（单用户 ≤3 条）
+    Hub-->>C: hello（服务器时间 · 心跳间隔 · proto · min_app_version）
+    C->>Hub: room.sub {room_id, last_seq}
+    Hub->>Redis: 读 Stream 补发 last_seq 之后的事件
+    alt 缺口过大
+        Hub-->>C: resync（客户端改走 REST 全量拉取）
+    else 可补
+        Hub-->>C: room.snapshot + 补发事件
+    end
+    loop 心跳
+        C->>Pres: ping → 刷新 presence:u:{id}（TTL 70s）
+    end
+    Redis-->>Hub: ws:events 订阅，只分发给本机上的目标用户连接
+```
+
+### 4.6 子系统解耦说明
+
+- **AI 网关与业务解耦**：`chat_service` 只依赖 `Translator` / `Polisher` 两个接口，不知道背后是哪家模型、是否命中缓存、是否已降级；换供应商、调提示词版本只改 `ai_service` 与 `pkg/llm`，不触及聊天流程（详见第 10 章）。
+- **实时分发与业务解耦**：业务代码只调用 `Publisher.Publish(event)`，不感知当前有几个 api 节点、目标用户连在哪台——这是“单节点起步、加节点零改动”的关键（原则 4）。
+- **审核与业务解耦**：本地词库（Aho-Corasick，`pkg/wordfilter`）与外部审核 API 都封装在 `moderation_service` 里，`chat_service` 只拿到“通过 / 拒绝 / 标记待审”三种结果。
+- **推送策略与 FCM 解耦**：推送时机、合并与免打扰规则在 `push_service`，FCM 调用细节在 `pkg/fcm`。
 
 ---
 
 ## 5. 项目目录结构
 
+采用经典分层：`handler`（接入）→ `service`（业务）→ `repository`（数据）→ `model`（实体），外加 `middleware`、`task`、`platform`、`pkg`。api 与 worker 共用同一套 service / repository / model。
+
 ```
 petbridge/
 ├── cmd/
-│   ├── api/                # HTTP + WS 入口
-│   ├── worker/             # asynq 消费者 + 定时任务
-│   └── tools/              # seedcodes（零号用户种子码）、backfill 等一次性工具
-├── api/openapi.yaml        # 接口契约（前后端共用）
+│   ├── api/
+│   │   └── main.go                    # 入口：装配依赖，启动 HTTP + WS 服务
+│   ├── worker/
+│   │   └── main.go                    # 入口：启动 asynq 消费者 + Scheduler
+│   └── tools/
+│       ├── seedcodes/main.go          # 一次性：生成零号用户种子码
+│       └── backfill/main.go           # 一次性：数据回填
+├── api/
+│   └── openapi.yaml                   # 接口契约（前后端共用）
 ├── internal/
 │   ├── config/
-│   ├── auth/               # Apple/Google 校验、JWT、刷新令牌
-│   ├── user/               # 用户、onboarding、MBTI→宠物映射
-│   ├── invite/             # 验证码生成、校验、奖励发放（核心）
-│   ├── room/               # 房间、成员、打卡、装扮
-│   ├── chat/               # 消息收发、送达记录、短语模板
-│   ├── ai/                 # AI 网关：provider、缓存、熔断、配额、提示词
-│   ├── moderation/         # 本地词库 + 外部审核
-│   ├── realtime/           # WS Hub、presence、事件分发、断线重放
-│   ├── push/               # FCM 封装、推送策略
-│   ├── safety/             # 举报、屏蔽、未成年人规则
-│   ├── platform/           # db(pgx)、redis、queue、storage、clock 等基础设施
-│   └── httpx/              # 中间件、统一响应、错误码
+│   │   └── config.go                  # koanf 配置加载（环境变量），启动自检
+│   ├── server/
+│   │   └── router.go                  # 路由分组与中间件链装配（见 4.4）
+│   ├── handler/                       # HTTP / WS 接入层（Gin）
+│   │   ├── response.go                # 统一 {data} / {error} 响应、错误码映射
+│   │   ├── health_handler.go          # /healthz、/readyz
+│   │   ├── auth_handler.go            # 登录（Apple/Google）、刷新、登出
+│   │   ├── user_handler.go            # /me、onboarding、mbti-change、账号删除
+│   │   ├── device_handler.go          # PUT /devices/current
+│   │   ├── invite_handler.go          # /codes、share-card
+│   │   ├── room_handler.go            # join、详情、leave、移除成员、解散、补码
+│   │   ├── chat_handler.go            # 发送/拉取消息、润色、已读
+│   │   ├── checkin_handler.go         # 打卡、装扮
+│   │   ├── config_handler.go          # /config/phrases
+│   │   ├── safety_handler.go          # 举报、屏蔽
+│   │   ├── widget_handler.go          # /widget/snapshot
+│   │   └── ws_handler.go              # HTTP → WebSocket 升级，连接注册进 Hub
+│   ├── service/                       # 业务逻辑层（不写 SQL，不依赖 Gin）
+│   │   ├── auth_service.go            # ID Token 校验、JWT 签发/校验、刷新令牌轮换
+│   │   ├── user_service.go            # 用户、onboarding 事务、MBTI→宠物映射
+│   │   ├── invite_service.go          # 验证码生成、校验、奖励发放（核心）
+│   │   ├── room_service.go            # 入房事务、成员、房主管理（踢人/解散/补码）
+│   │   ├── chat_service.go            # 消息同步段：校验、审核、幂等落库、入队
+│   │   ├── checkin_service.go         # 打卡、能量、装扮解锁
+│   │   ├── ai_service.go              # AI 网关：缓存→配额→熔断→供应商链→降级
+│   │   ├── moderation_service.go      # 本地词库 + 外部审核
+│   │   ├── safety_service.go          # 举报、屏蔽、未成年人规则
+│   │   ├── push_service.go            # 推送策略（时机、合并、免打扰）
+│   │   ├── hub_service.go             # WS Hub：本机连接池、订阅 ws:events、分发
+│   │   ├── presence_service.go        # presence 刷新与状态广播
+│   │   ├── event_publisher.go         # Publisher：写 ws:events 频道 + 房间事件 Stream
+│   │   └── app_config_service.go      # app_config 读取（进程内缓存 30 秒）
+│   ├── repository/                    # 数据访问层（pgx + sqlc），唯一访问 PostgreSQL 的地方
+│   │   ├── tx.go                      # TxManager：WithTx，保证全局加锁顺序
+│   │   ├── sqlcgen/                   # sqlc 生成代码（勿手改）
+│   │   ├── user_repo.go
+│   │   ├── auth_identity_repo.go
+│   │   ├── refresh_token_repo.go
+│   │   ├── device_repo.go
+│   │   ├── room_repo.go
+│   │   ├── room_member_repo.go        # 含 room_bans
+│   │   ├── invite_code_repo.go
+│   │   ├── reward_repo.go             # reward_grants、invite_edges
+│   │   ├── message_repo.go
+│   │   ├── delivery_repo.go
+│   │   ├── checkin_repo.go            # 含 room_progress、room_decor
+│   │   ├── safety_repo.go             # reports、blocks
+│   │   ├── ai_usage_repo.go
+│   │   └── app_config_repo.go
+│   ├── model/                         # 实体、DTO、事件帧、错误码（不依赖其他层）
+│   │   ├── user.go
+│   │   ├── room.go
+│   │   ├── invite_code.go
+│   │   ├── message.go                 # Message、Delivery
+│   │   ├── checkin.go
+│   │   ├── safety.go
+│   │   ├── event.go                   # WS 帧与事件负载（对应第 9 章）
+│   │   └── errcode.go                 # 业务错误码（对应第 8 章）
+│   ├── middleware/
+│   │   ├── request_id_middleware.go
+│   │   ├── logger_middleware.go       # slog JSON 日志
+│   │   ├── recovery_middleware.go
+│   │   ├── version_middleware.go      # min_app_version 校验，低版本返回 426
+│   │   ├── auth_middleware.go         # Auth()：校验 access token，写入 user_id
+│   │   ├── onboarding_middleware.go   # RequireOnboarded()
+│   │   └── ratelimit_middleware.go    # Redis 令牌桶：按 IP / 用户 / 接口
+│   ├── task/                          # worker 入口层（asynq）
+│   │   ├── translate_task.go          # translate:{message_id}：翻译 + 后置审核 + 发布事件
+│   │   ├── polish_task.go
+│   │   ├── push_task.go
+│   │   ├── cleanup_task.go            # 过期码清理、消息脱敏/删除（分批）
+│   │   └── scheduler.go               # 定时任务注册
+│   └── platform/                      # 基础设施
+│       ├── db/                        # pgx 连接池、迁移执行
+│       ├── redis/
+│       ├── queue/                     # asynq client / server 封装
+│       ├── storage/                   # S3 兼容存储
+│       └── clock/
+├── pkg/                               # 与业务无关、可复用，不依赖 internal/*
+│   ├── llm/                           # Translator / Polisher 接口 + 各供应商实现 + gobreaker
+│   ├── mt/                            # 机器翻译兜底
+│   ├── fcm/                           # FCM HTTP v1 封装
+│   ├── idtoken/                       # Apple / Google ID Token 校验
+│   └── wordfilter/                    # Aho-Corasick 敏感词自动机（按语言分库）
 ├── db/
-│   ├── migrations/         # goose SQL
-│   └── queries/            # sqlc 查询
-├── deploy/                 # compose.yml、Caddyfile、备份脚本
-└── test/                   # 集成测试、k6 压测脚本
+│   ├── migrations/                    # goose SQL
+│   └── queries/                       # sqlc 查询源文件
+├── deploy/                            # compose.yml、Caddyfile、备份脚本
+├── scripts/                           # 本地开发脚本（Windows PowerShell）
+└── test/                              # 集成测试、k6 压测脚本
 ```
 
-依赖方向：`httpx → 各业务包 → platform`，业务包之间只通过接口通信，避免循环依赖。
+各层职责与允许/禁止事项见 4.3 的表格；这里再补充几条目录层面的约定：
+
+- **handler 只做接入**：参数绑定与校验、调用 service、组装响应，不含业务规则。
+- **service 划定事务边界**：需要多表原子性的操作（入房、onboarding、房主解散）由 service 通过 `repository.TxManager.WithTx` 开启事务，Repository 方法接收事务句柄；全局加锁顺序 `users → invite_codes → rooms → room_members`（见 7.2）统一在 `tx.go` 的约定与注释里维护。
+- **repository 暴露 interface**：service 依赖接口而不是具体实现，单元测试用 mock，集成测试用真实 PostgreSQL。
+- **model 零依赖**：只放结构体与常量，任何层都可引用。
+- **task 与 handler 同级**：二者都只是 service 的调用方；worker 进程不加载 Gin 与 handler。
+- **pkg 不依赖 internal**：保证外部供应商封装可单独测试、可复用。
+- **依赖方向**：`handler / task → service → repository → platform`，`model` 被各层共用；各 service 之间只通过接口通信，避免循环依赖。
 
 ---
 

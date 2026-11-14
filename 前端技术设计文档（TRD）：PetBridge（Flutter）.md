@@ -9,6 +9,8 @@
 | 平台 | iOS 15+、Android 8+（竖屏，手机优先，不适配平板） |
 | 开发模式 | **单人全栈开发**，选型以“一个人能长期维护”为第一约束 |
 
+> **（2026-11-14 结构调整，无功能变更）** 第 4 章“总体架构”扩写为 4.1～4.6：新增 mermaid 总览图、分层职责与依赖规则、MVVM 对应、三条关键链路时序图（启动与会话判定 / 发送消息 / WS 事件入站）、子系统解耦说明；第 5 章“项目目录结构”改为 feature-first 且 feature 内按 `data / application / presentation / models` 分层，新增 `config/`、`shared/`（通用组件与共用模型）、`app/router`、`app/event_reducer`，并给出与常见前端分层的对照表；新增 11.0“界面总览与线框大纲”。`core/config/env.dart` 调整为 `config/env.dart`（19.4 同步）。
+>
 > **V1.2 变更说明**：对齐 PRD v1.4 与后端 TRD v1.2。① **修复会话状态机**（6.1、第 7 章）：V1.1 中只有"自己加入他人房间"才会从 `solo` 进入 `inRoom`，且 `solo` 状态不连接 WebSocket——朋友加入了你的小屋，你却收不到 `member.joined`、看不到小屋，最关键的邀请链路会直接坏掉。现改为 `solo` / `inRoom` 由房间数据派生（任一在席房间的成员数 > 1 即为 `inRoom`，全部回到 1 人时退回 `solo`，双向可切换），WebSocket 在完成 onboarding 后即连接并订阅自己的小屋，回到前台时再调用一次 `GET /rooms/mine` 校正。② **新增房主管理界面**（新增 11.6 节、6.2 新增 `/room/:id/manage` 路由）：移除成员、解散、自助补码，房主在自己的小屋里不显示"退出小屋"；被移除或被解散的一方收到 `room.kicked` 后退回首页、清除该房间的本地消息缓存与 `last_seq`，只提示"你已离开该小屋"，不展示原因与操作者（第 7 章 reducer 新增规则 5，第 18 章补充降级体验）。③ 极简测试确定为 4 题（每维度 1 题），PRD 已同步，11.1、21.1 去掉"待确认"。④ 错误码展示新增 `ROOM_LIMIT`、`NOT_ROOM_OWNER`、`OWNER_CANNOT_LEAVE`、`CODE_ISSUE_LIMIT`（后者按 `details.reason` 区分四种文案）。⑤ Widget 刷新对齐后端新增的 `widget.refresh` data-only 推送，并通过 `PUT /devices/current` 上报 `widget_installed`（14.2）；iOS 对静默推送有系统节流，不保证送达，Widget 上继续标注更新时间。⑥ 联调清单（19.5）补充房主移除成员、解散与补码、别人加入我的小屋三个场景。其余章节（网络层、WebSocket 客户端、小屋渲染、本地存储、i18n、性能与安全）不变。
 >
 > **V1.1 变更说明**：暂不首发中国大陆；新增 MVVM 架构说明；强制更新接口已与后端对齐。
@@ -73,76 +75,332 @@
 
 ## 4. 总体架构
 
+### 4.1 系统总览
+
+```mermaid
+flowchart TB
+    subgraph Device["设备（Flutter App）"]
+        direction TB
+
+        subgraph Pres["presentation 层（View）"]
+            Pages["Pages / Widgets\nonboarding · room · chat · invite · settings"]
+            Shared["shared/widgets\n通用组件：按钮 · 加载 · 骨架屏 · 空态 · 弹层"]
+            PetView["PetView / RoomScene\nRive 宠物 + Stack 场景"]
+        end
+
+        subgraph App["application 层（ViewModel，Riverpod）"]
+            Session["sessionProvider\n会话状态机（派生）"]
+            Ctrl["Controllers / Notifiers\nauth · me · rooms · room · chat · codes · join · phrases"]
+            Reducer["RoomEventReducer\nWS 事件 → 房间 / 聊天 / presence 状态"]
+        end
+
+        subgraph Data["data 层（Model）"]
+            Repo["Repositories\n（各 feature 内）"]
+            Gen["lib/gen\nOpenAPI 生成的 dio 客户端 + DTO"]
+            Mapper["DTO → 本地不可变模型（freezed）"]
+        end
+
+        subgraph Core["core 层（基础设施）"]
+            Net["network\ndio · 拦截器链 · AppFailure"]
+            RT["realtime\nWsClient · 重连退避 · 事件模型"]
+            Store["storage\nsecure · prefs · drift（messages_cache / outbox / phrases_cache）"]
+            Infra["l10n · analytics · utils"]
+        end
+
+        Router["app/router\ngo_router + redirect 守卫"]
+        Config["config\nenv · constants · 错误码"]
+        Native["原生桥接\nhome_widget · FCM · app_links · share_plus"]
+    end
+
+    subgraph Remote["后端与第三方"]
+        REST["REST /api/v1\n（后端 TRD 第 8 章）"]
+        WSS["WSS /ws\n（后端 TRD 第 9 章）"]
+        FCM["FCM（iOS 经 APNs）"]
+        IDP["Apple / Google 登录"]
+        WidgetExt["原生 Widget\nWidgetKit / Glance"]
+    end
+
+    Pages --> Ctrl
+    Pages --> Shared
+    Pages --> PetView
+    Router -->|"redirect 只读"| Session
+    Pages -.->|"watch"| Session
+    Ctrl --> Repo
+    Ctrl --> Session
+    Reducer --> Ctrl
+    Repo --> Gen --> Net
+    Repo --> Mapper
+    Repo --> Store
+    Net -->|"HTTPS"| REST
+    RT -->|"WSS + Authorization"| WSS
+    RT -->|"events 流"| Reducer
+    Ctrl -->|"订阅 / 发送 pet.tap"| RT
+    Ctrl --> Native
+    Native --> FCM
+    Native --> WidgetExt
+    Ctrl -->|"登录"| IDP
+    Config --> Net
+    Config --> RT
 ```
-┌────────────────────────── presentation ──────────────────────────┐
-│  Pages / Widgets（只读 provider，用户操作调用 controller 方法）     │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │ watch / read
-┌──────────────────────────────▼──────────────────────────────────┐
-│  application：Controllers / Notifiers（Riverpod）                  │
-│  会话、房间、聊天、验证码、打卡；WS 事件 reducer                    │
-└───────────────┬───────────────────────────────┬──────────────────┘
-                │                               │
-┌───────────────▼────────────┐   ┌──────────────▼──────────────────┐
-│ data：Repositories          │   │ realtime：WsClient              │
-│ API 客户端（生成）+ drift   │   │ 连接、重连、订阅、事件流         │
-└───────────────┬────────────┘   └──────────────┬──────────────────┘
-                │                               │
-         REST（dio + 拦截器）              WSS（带 Authorization）
+
+**读图要点：**
+
+- **数据只往一个方向流**：用户操作 → Controller → Repository → 网络 / 本地库；结果回到 Controller 的状态，Widget 只 `watch`。WS 事件不直接碰页面，先进 `RoomEventReducer`，再更新 Controller 状态。
+- **`sessionProvider` 是路由的唯一依据**：`go_router` 的 `redirect` 只读取它（见 6.1），保证页面不会在不合法状态下被打开。
+- **契约驱动**：`lib/gen` 由后端 `api/openapi.yaml` 生成，不手改；Repository 是唯一知道 DTO 的地方，往上只暴露本地不可变模型。
+- **服务端是真相来源**：验证码是否有效、房间是否已满、能否润色，客户端只做格式预校验和展示。
+
+### 4.2 分层职责
+
+| 层 | 目录 | 职责 | 不允许做的事 |
+| :-- | :-- | :-- | :-- |
+| 入口与装配 | `lib/main_*.dart`、`lib/app/` | 读环境配置、初始化 Sentry / Firebase、挂载 `ProviderScope` 与 `MaterialApp.router`、主题、路由 | 不含业务逻辑 |
+| presentation | `features/*/presentation/` | 页面与 Widget；只 `watch` provider、转发用户操作；表单本地校验（格式预校验） | 不直接调用网络、数据库、WS；不做业务判断 |
+| application | `features/*/application/` | Riverpod Notifier / Controller（ViewModel）：持有界面状态、处理用户操作、编排 Repository；生成幂等键（`client_msg_id`） | 不 import Flutter UI 包；不直接使用 dio |
+| data | `features/*/data/` | Repository：调用生成的 API 客户端与 drift，DTO ↔ 本地模型转换 | 不含界面状态；不依赖 presentation |
+| model | `features/*/models/`、`shared/models/` | 不可变本地模型（freezed）、枚举；不依赖任何层 | 不含逻辑与 I/O |
+| core | `core/` | 与业务无关的基础设施：dio 与拦截器、WsClient、secure / prefs / drift、l10n、analytics、通用工具 | 不 import `features/*` |
+| shared | `shared/` | 跨 feature 复用的通用 Widget、跨 feature 共用的模型与 provider | 不 import `features/*` |
+| config | `config/` | 环境变量封装（`--dart-define-from-file`）、常量、错误码枚举 | 业务代码不绕过它直接读 `String.fromEnvironment` |
+| gen | `gen/` | OpenAPI 生成代码 | 不手改，CI 校验无差异 |
+
+### 4.3 依赖规则（单向）
+
+```mermaid
+flowchart LR
+    P["presentation"] --> A["application"]
+    A --> D["data"]
+    D --> C["core"]
+    A -.-> M["models"]
+    D -.-> M
+    P -.-> M
+    P --> S["shared"]
+    A --> S
+    D --> G["gen"]
+    C --> CFG["config"]
 ```
 
-**约定**：
+- 依赖方向：`presentation → application → data → core`；`models` 与 `config` 被各层引用，自身不引用上层。
+- **feature 之间不互相 import 对方的 `presentation` 与 `data`**：需要对方的数据时，只能通过对方公开的 provider（`application` 层）或 `shared/` 里的共用模型。例如 `chat` 要知道“当前房间成员”，读 `room` 暴露的 `roomControllerProvider`，而不是 import `room` 的 Repository。
+- `core` 与 `shared` 不 import `features/*`，保证基础设施和通用组件可以单独测试、复用。
+- 跨 feature 的编排（如 `RoomEventReducer` 要同时更新房间、聊天、presence）放在 `app/event_reducer/`，由它调用各 feature 的 Controller 公开方法。
 
-- 页面不直接调用网络或数据库，只通过 controller。
-- WS 事件统一进入 `RoomEventReducer`，由它更新房间、聊天、presence 状态；页面不直接订阅 WS。
-- 所有跨层模型在 `data` 层用生成的 DTO，进入 `application` 层前转换为本地不可变模型，避免接口变更直接冲击 UI。
+### 4.4 架构模式：MVVM（单向数据流）
 
----
-
-**架构模式：MVVM（单向数据流）。** 本项目不使用 MVC（Flutter 的声明式 Widget 不需要 Controller 手动更新界面），也不引入完整的 Clean Architecture（会多出 domain 层与 UseCase，一个人维护样板过多）。对应关系如下：
+本项目不使用 MVC（Flutter 的声明式 Widget 不需要 Controller 手动更新界面），也不引入完整的 Clean Architecture（会多出 domain 层与 UseCase，一个人维护样板过多）。对应关系如下：
 
 | MVVM 角色 | 本项目对应 | 说明 |
 | :-- | :-- | :-- |
 | View | `presentation`：页面与 Widget | 只读状态，转发用户操作 |
 | ViewModel | `application`：Riverpod 的 Notifier / Controller | 持有界面状态、处理用户操作、调用 Repository；目录名沿用 `application`，需要时也可改叫 `viewmodel` |
-| Model | `data`：Repository、生成的 API 客户端、drift、WsClient | 数据来源与持久化，向上输出不可变模型 |
+| Model | `data` + `models`：Repository、生成的 API 客户端、drift、不可变本地模型 | 数据来源与持久化，向上输出不可变模型；WsClient 在 `core/realtime`，由 application 层订阅 |
 
 复杂业务逻辑出现时，再把它从 ViewModel 抽成独立的 domain 层，MVP 阶段不预先设计。
 
-## 5. 项目目录结构（feature-first）
+### 4.5 三条关键链路（跨层调用示意）
+
+**① 启动与会话判定（决定路由去向，详见第 6 章）**
+
+```mermaid
+sequenceDiagram
+    participant M as main_*.dart
+    participant Sp as SplashPage
+    participant Auth as authController
+    participant Me as meProvider
+    participant Rooms as roomsProvider
+    participant Sess as sessionProvider
+    participant R as go_router
+
+    M->>Sp: 启动（初始化 Sentry / Firebase / ProviderScope）
+    Sp->>Auth: 从 secure storage 读 token
+    alt 无 token
+        Auth-->>Sess: unauthenticated
+    else 有 token
+        Auth->>Me: GET /me
+        Me-->>Sess: onboarded？
+        alt 未完成 onboarding
+            Sess-->>R: needsOnboarding
+        else 已完成
+            Auth->>Rooms: GET /rooms/mine
+            Note over Auth: 同时连接 WS 并订阅自己的小屋（solo 也连接）
+            Rooms-->>Sess: 任一房间 member_count > 1 ? inRoom : solo
+        end
+    end
+    Sess-->>R: redirect 读取会话状态，跳转 /login、/onboarding/* 或 /home
+```
+
+**② 发送消息（乐观更新 + 幂等重试，详见 11.4 与第 12 章）**
+
+```mermaid
+sequenceDiagram
+    participant UI as ChatInputBar
+    participant C as chatController
+    participant O as outbox（drift）
+    participant Repo as ChatRepository
+    participant API as 生成客户端 + dio 拦截器链
+    participant WS as WsClient
+    participant Red as RoomEventReducer
+
+    UI->>C: send(text, polish)
+    C->>C: 生成 client_msg_id
+    C->>O: 入队 pending；列表立即以「发送中」上屏
+    C->>Repo: sendMessage(...)
+    Repo->>API: POST /rooms/{id}/messages（Idempotency-Key = client_msg_id）
+    alt 成功 202
+        API-->>C: message_id
+        C->>O: 标记已发送
+    else 网络错误 / 5xx
+        API-->>API: RetryInterceptor 复用同一幂等键重试（最多 2 次）
+        API-->>C: 仍失败 → 保持 pending，网络恢复后补发；3 次失败标记 failed 显示重试入口
+    end
+    Note over WS,Red: 译文就绪后服务端推送 message.new
+    WS-->>Red: events 流
+    Red->>C: 更新消息的译文与「已润色」状态
+    C-->>UI: 信使卡片刷新
+```
+
+**③ WebSocket 事件入站（详见第 7、9 章）**
+
+```mermaid
+sequenceDiagram
+    participant WS as WsClient（core/realtime）
+    participant Red as RoomEventReducer（app/event_reducer）
+    participant RoomC as roomController
+    participant ChatC as chatController
+    participant Rooms as roomsProvider
+    participant Sess as sessionProvider
+
+    WS->>Red: events（带 seq）
+    Red->>Red: seq 重复或更小则丢弃；缺口 < 20 先缓冲；超时仍缺口 → resync
+    alt member.joined / presence.update / checkin.updated / decor.unlocked
+        Red->>RoomC: 更新成员、presence、能量、装扮
+        Red->>Rooms: member_count 变化
+        Rooms->>Sess: 重新派生 solo / inRoom
+    else message.new / message.polished
+        Red->>ChatC: 写入或更新消息
+    else room.kicked（不依赖 seq，收到即处理）
+        Red->>Rooms: 移除该房间 · 取消订阅 · 清本地缓存与 last_seq
+        Rooms->>Sess: 可能退回 solo
+    else 未知事件类型
+        Red->>Red: 忽略，不报错（向前兼容）
+    end
+    Red->>Red: 更新 last_seq 写 prefs（节流，最多每秒一次）
+```
+
+### 4.6 子系统解耦说明
+
+- **实时通道与页面解耦**：`WsClient` 只暴露 `connectionState` 与 `events` 两个流，页面不接触 WS；房间页销毁只取消对应房间订阅，不关闭连接（连接是会话级的）。
+- **宠物动画与代码解耦**：所有宠物实现同一份 Rive 接口契约（见第 10 章），`PetView` 只认 `mbti` 与 `mood`；开发期统一用 `pet_placeholder.riv`，美术到位后只替换资源。
+- **桌面 Widget 与主应用解耦**：`widget_bridge` 只负责把状态写入共享存储并触发刷新，原生 Widget 独立渲染，不运行 Flutter 代码（见第 14 章）。
+- **埋点与业务解耦**：业务代码只调 `core/analytics` 的封装，不直接依赖具体 SDK（见 19.1）。
+- **环境配置与业务解耦**：环境差异只出现在 `config/env.dart`，业务代码不读取 `String.fromEnvironment`（见 19.4）。
+
+---
+
+## 5. 项目目录结构（feature-first，feature 内分层）
+
+在 feature-first 的基础上，每个 feature 内部再按 `data / application / presentation / models` 分层，对应 MVVM 的 Model / ViewModel / View；全局公共部分拆成 `config`、`core`、`shared`、`gen`。下表给出与常见前端工程分层的对应关系，便于对照：
+
+| 常见前端分层 | 本项目对应 | 说明 |
+| :-- | :-- | :-- |
+| `api/` | `features/*/data/` + `gen/` + `core/network/` | 接口由 OpenAPI 生成（`gen/`），Repository 在各 feature 的 `data/`，dio 与拦截器在 `core/network/` |
+| `assets/` | `assets/` | 图片、宠物 Rive、装扮、ARB、短语模板 |
+| `components/` | `shared/widgets/` | 跨业务复用的通用 UI 组件；仅某 feature 使用的组件放该 feature 的 `presentation/widgets/` |
+| `config/` | `config/` | 环境变量、常量、错误码枚举 |
+| `hooks/` / `composables/` | `features/*/application/` + `shared/providers/` | Flutter 没有 hooks 概念，对应 Riverpod 的 provider 与 Notifier |
+| `models/` / `types/` | `features/*/models/` + `shared/models/` | freezed 不可变模型 |
+| `pages/` / `views/` | `features/*/presentation/pages/` | 页面级 Widget，按业务模块划分 |
+| `router/` | `app/router/` | `go_router` 路由表、redirect 守卫 |
+| `store/` / `services/` | `features/*/application/` + `core/storage/` | 状态在 Controller；本地持久化在 `core/storage/` |
+| `utils/` | `core/utils/` | 格式化、校验、防抖等纯函数 |
+| `main.ts` / `App.tsx` | `main_*.dart` + `app/app.dart` | 入口与根组件 |
 
 ```
 petbridge_app/
 ├── lib/
-│   ├── main_dev.dart / main_staging.dart / main_prod.dart
-│   ├── app/                # MaterialApp、主题、路由、全局 provider
-│   ├── core/
-│   │   ├── network/        # dio、拦截器、错误映射、幂等键
-│   │   ├── realtime/       # WsClient、事件模型、重连策略
-│   │   ├── storage/        # secure、prefs、drift 数据库
-│   │   ├── l10n/           # 生成的本地化类
-│   │   ├── analytics/      # 埋点封装
-│   │   └── utils/
+│   ├── main_dev.dart / main_staging.dart / main_prod.dart   # 入口：只选择环境并调用 bootstrap
+│   ├── app/                              # 应用装配（不含业务）
+│   │   ├── app.dart                      # MaterialApp.router、主题、locale
+│   │   ├── bootstrap.dart                # 初始化 Sentry / Firebase / 依赖覆盖，挂载 ProviderScope
+│   │   ├── router/
+│   │   │   ├── app_router.dart           # GoRouter 实例与 redirect（只读 sessionProvider）
+│   │   │   ├── routes.dart               # 路由路径常量（对应 6.2 路由表）
+│   │   │   └── deep_link.dart            # /j/{code} → /join?code= 解析与入参正则校验
+│   │   ├── theme/                        # 颜色、字号（限制缩放 0.8–1.3）、组件主题
+│   │   └── event_reducer/                # 跨 feature 的 WS 事件编排
+│   │       └── room_event_reducer.dart   # 纯函数，必须有单元测试（见第 7 章规则 1–5）
+│   ├── config/
+│   │   ├── env.dart                      # --dart-define-from-file 的统一读取入口
+│   │   ├── constants.dart                # 常量：容量上限、冷却、超时、缓存天数等
+│   │   └── error_codes.dart              # 后端业务错误码枚举 → 本地化 key（err.{CODE}）
+│   ├── core/                             # 与业务无关的基础设施（不 import features/*）
+│   │   ├── network/
+│   │   │   ├── dio_client.dart           # dio 实例、超时
+│   │   │   ├── interceptors/             # auth（单飞刷新）、idempotency、retry、error_map、log
+│   │   │   └── app_failure.dart          # AppFailure(code, retryAfter?, requestId)
+│   │   ├── realtime/
+│   │   │   ├── ws_client.dart            # 连接状态机、心跳、订阅；只暴露 connectionState / events
+│   │   │   ├── ws_event.dart             # 事件模型（对应后端 TRD 第 9 章）
+│   │   │   └── reconnect_policy.dart     # 1–30 秒退避 + 抖动、前后台策略
+│   │   ├── storage/
+│   │   │   ├── secure_store.dart         # access / refresh token
+│   │   │   ├── prefs_store.dart          # 语言、开关、各房间 last_seq
+│   │   │   └── db/                       # drift：messages_cache、outbox、phrases_cache
+│   │   ├── l10n/                         # gen-l10n 生成的本地化类
+│   │   ├── analytics/                    # 埋点封装（19.1 事件清单）
+│   │   └── utils/                        # 格式化、校验器（验证码格式）、防抖、时钟
+│   ├── shared/                           # 跨 feature 复用（不 import features/*）
+│   │   ├── widgets/                      # app_button、loading、skeleton、empty_view、error_view、confirm_sheet、toast
+│   │   ├── models/                       # 多个 feature 共用的模型（如 UserSummary、RoomSummary）
+│   │   └── providers/                    # 跨 feature 的通用 provider（如 clock、connectivity）
 │   ├── features/
-│   │   ├── auth/           # 登录、会话
-│   │   ├── onboarding/     # 语言、MBTI、测试、宠物揭晓、年龄
-│   │   ├── pet/            # 宠物资源注册表、PetView、动画接口
-│   │   ├── invite/         # 背包、验证码输入、分享海报
-│   │   ├── room/           # 小屋场景、成员、presence、打卡、装扮
-│   │   ├── chat/           # 消息列表、信使卡片、输入栏、短语
-│   │   ├── safety/         # 举报、屏蔽
-│   │   ├── settings/       # 语言、推送、隐私、删除账号
-│   │   └── widget_bridge/  # 向原生 Widget 写数据
-│   └── gen/                # OpenAPI 生成的客户端（不手改）
+│   │   ├── auth/                         # 登录（Apple / Google）、令牌、会话
+│   │   │   ├── data/                     #   auth_repository.dart
+│   │   │   ├── application/              #   auth_controller.dart、session_provider.dart
+│   │   │   ├── models/                   #   session_state.dart
+│   │   │   └── presentation/             #   pages/(splash、login) · widgets/
+│   │   ├── onboarding/                   # 语言、MBTI、测试、宠物揭晓、昵称与年龄
+│   │   │   ├── data/ · application/ · models/
+│   │   │   └── presentation/             #   pages/(lang、mbti、quiz、reveal、profile) · widgets/
+│   │   ├── pet/                          # 宠物资源注册表、PetView、动画接口（第 10 章）
+│   │   │   ├── application/              #   pet_registry.dart
+│   │   │   └── presentation/             #   pet_view.dart、pet_animation_controller.dart
+│   │   ├── invite/                       # 背包、验证码输入、分享海报
+│   │   │   ├── data/ · application/ (codes_provider、join_controller) · models/
+│   │   │   └── presentation/             #   pages/(codes、share_poster、join) · widgets/(code_input、poster_canvas)
+│   │   ├── room/                         # 小屋场景、成员、presence、打卡、装扮、房主管理
+│   │   │   ├── data/ · application/ (rooms_provider、room_controller) · models/
+│   │   │   └── presentation/             #   pages/(room、room_manage) · widgets/(room_scene、seat_anchor、decor_layer)
+│   │   ├── chat/                         # 消息列表、信使卡片、输入栏、短语
+│   │   │   ├── data/                     #   chat_repository.dart、outbox_dao.dart
+│   │   │   ├── application/              #   chat_controller.dart、phrase_templates_provider.dart
+│   │   │   ├── models/
+│   │   │   └── presentation/             #   widgets/(courier_card、chat_input_bar、phrase_bar、message_list)
+│   │   ├── safety/                       # 举报、屏蔽
+│   │   ├── settings/                     # 语言、推送、隐私、删除账号
+│   │   ├── home/                         # 底部 Tab 容器（小屋 / 背包 / 我的）
+│   │   └── widget_bridge/                # 向原生 Widget 写数据（home_widget）
+│   └── gen/                              # OpenAPI 生成的客户端与 DTO（不手改）
 ├── assets/
-│   ├── pets/               # pet_{mbti}.riv（含占位 pet_placeholder.riv）
-│   ├── decor/              # 装扮 WebP
-│   ├── l10n/               # ARB
-│   └── phrases/            # 随包的短语模板兜底版本
-├── ios/ (含 WidgetExtension)  android/ (含 Glance Widget)
-├── test/  integration_test/
-└── tool/                   # 生成客户端、导出资源的脚本
+│   ├── images/                           # 通用图标、插画（WebP / SVG）
+│   ├── pets/                             # pet_{mbti}.riv（含占位 pet_placeholder.riv）与 Widget 静态图
+│   ├── decor/                            # 装扮 WebP 与解锁前剪影
+│   ├── l10n/                             # ARB（ja / ko / zh-Hant / zh-Hans / en）
+│   └── phrases/                          # 随包的短语模板兜底版本
+├── env/                                  # dev_android.json / local.json 等 --dart-define-from-file 配置（不含密钥）
+├── ios/ (含 WidgetExtension)    android/ (含 Glance Widget)
+├── test/                                 # 与 lib/ 同构；reducer、controller、repository 单测，golden
+├── integration_test/
+└── tool/                                 # gen_api.sh、导出资源等脚本
 ```
+
+目录约定：
+
+- **feature 内按需建目录**：不是每个 feature 都需要四个子目录（如 `pet`、`safety` 没有 `data/`），没有内容就不建空目录。
+- **page 私有的组件放在自己 feature 的 `presentation/widgets/`**，只有被两个以上 feature 使用时才上移到 `shared/widgets/`，避免 `shared` 变成杂物间。
+- **models 就近放置**：只在一个 feature 内使用的模型留在该 feature 的 `models/`；被多个 feature 共用的才放 `shared/models/`。
+- **生成代码隔离**：`gen/` 与 `core/l10n/` 下的生成文件不手改，CI 中校验生成结果无差异。
+- **测试目录与 `lib/` 同构**，便于一眼找到对应的测试。
 
 ---
 
@@ -308,6 +566,170 @@ RoomScene（固定比例容器，RepaintBoundary）
 ---
 
 ## 11. 核心页面设计要点
+
+### 11.0 界面总览与线框大纲
+
+以下为各核心页面的**低保真线框大纲**，只定义信息层级与主要交互，不规定视觉细节；视觉稿出来后以设计稿为准，线框仅用于对齐功能范围与组件拆分。竖屏手机，宽度按相对比例适配。
+
+**页面导航关系**
+
+```mermaid
+flowchart LR
+    Splash["启动页 /splash"] --> Login["登录 /login"]
+    Login --> OnbLang["语言 /onboarding/lang"]
+    OnbLang --> OnbMbti["MBTI /onboarding/mbti"]
+    OnbMbti -->|"我不确定"| OnbQuiz["极简测试 /onboarding/quiz"]
+    OnbQuiz --> OnbMbti
+    OnbMbti --> Reveal["宠物揭晓 /onboarding/reveal"]
+    Reveal --> Profile["昵称与年龄 /onboarding/profile"]
+    Profile --> Home["首页 /home"]
+    Splash -->|"已登录且已 onboarding"| Home
+
+    subgraph Tabs["底部 Tab（/home）"]
+        TabRoom["小屋"]
+        TabCodes["背包 /codes"]
+        TabMe["我的 /settings"]
+    end
+    Home --> Tabs
+    TabRoom --> Room["小屋页 /room/:id"]
+    Room --> Manage["房主管理 /room/:id/manage"]
+    Room --> Report["举报 /report"]
+    TabRoom --> Join["输入验证码 /join"]
+    TabCodes --> Share["分享海报 /codes/share/:code"]
+    TabCodes --> Join
+    TabMe --> Settings["设置 / 隐私 / 删除账号"]
+```
+
+**① 登录页**
+
+```
+┌──────────────────────────┐
+│                          │
+│        [ Logo / 宠物 ]    │
+│        PetBridge         │
+│     一句话产品定位文案      │
+│                          │
+│  [  Sign in with Apple ] │
+│  [  Sign in with Google ]│
+│                          │
+│  《用户协议》《隐私政策》   │
+└──────────────────────────┘
+```
+
+**② Onboarding（5 步，顶部进度条 + 返回）**
+
+```
+语言            MBTI               极简测试(4题)        宠物揭晓             昵称与年龄
+┌────────┐   ┌────────────┐    ┌────────────┐    ┌────────────┐    ┌────────────┐
+│ ○ 日本語 │   │ 16 型网格   │    │ 第 2 / 4 题 │    │  出生动画    │    │ 昵称 [____] │
+│ ○ 한국어 │   │ [INTJ][INTP]│    │ 题干        │    │  [ 宠物 ]   │    │ 年龄区间    │
+│ ● 繁中   │   │ [ENTJ]...  │    │ ( ) 选项 A  │    │  性格介绍    │    │ ( )13–17    │
+│ ○ 简中   │   │ 或四维滑块  │    │ ( ) 选项 B  │    │             │    │ ( )18+      │
+│ ○ English│   │ 我不确定 →  │    │             │    │ [ 继续 ]    │    │ [ 完成 ]    │
+│ [ 继续 ] │   └────────────┘    └────────────┘    └────────────┘    └────────────┘
+└────────┘
+```
+
+**③ 首页：底部 Tab 容器**
+
+```
+┌──────────────────────────┐
+│ 状态栏 / 标题              │
+├──────────────────────────┤
+│                          │
+│     当前 Tab 内容          │
+│  小屋（solo 时：单只宠物    │
+│  + “输入验证码解锁小屋”）   │
+│                          │
+├──────────────────────────┤
+│   小屋     背包     我的   │
+└──────────────────────────┘
+```
+
+**④ 小屋页（场景 + 聊天，核心页面）**
+
+```
+┌──────────────────────────┐
+│ ← 小屋名/房间切换   ⋯ 设置  │  ⋯：房主 → 管理；成员 → 退出小屋
+├──────────────────────────┤
+│  ┌────────────────────┐  │
+│  │ 背景 + 装扮层        │  │  场景（固定比例，RepaintBoundary）
+│  │  [宠物2]  [宠物1房主] │  │  座位 1–5 固定锚点
+│  │  [宠物3]  [宠物4]    │  │  点击宠物：本地立即动画 + pet.tap
+│  └────────────────────┘  │
+│  能量条 ▓▓▓▓░░   [打卡]   │
+├──────────────────────────┤  ← 可上拉全屏
+│ 聊天列表（倒序，游标分页）   │
+│  ┌ 信使卡片 ───────────┐  │
+│  │ 🐱 昵称 🇯🇵          │  │
+│  │ 译文 | 润色 | 原文    │  │  三态本地切换
+│  │ [让 AI 润色]         │  │
+│  └─────────────────────┘  │
+├──────────────────────────┤
+│ 常用短语： 早安 晚安 谢谢 …  │
+│ [润色 ○] [ 输入框      ][➤]│
+└──────────────────────────┘
+```
+
+**⑤ 验证码输入页**
+
+```
+┌──────────────────────────┐
+│ ←  输入验证码              │
+│                          │
+│     [ XXXX - XXXX ]      │  自动大写、去空格与连字符
+│     [ 粘贴 ]              │  不自动读取剪贴板
+│     （错误/冷却倒计时文案）   │
+│                          │
+│     [   加入小屋   ]       │  格式不合法时不可点
+└──────────────────────────┘
+```
+
+**⑥ 背包与分享海报**
+
+```
+背包                              分享海报（离屏 1080×1440 导出）
+┌──────────────────────────┐    ┌──────────────────────┐
+│ 我的验证码                 │    │      [ 宠物形象 ]      │
+│ ┌──────────────────────┐ │    │   XXXX-XXXX           │
+│ │ XXXX-XXXX  未使用 6天  │ │    │   小屋 2 / 5 人        │
+│ │              [分享]    │ │    │   [ 邀请二维码 ]       │
+│ ├──────────────────────┤ │    └──────────────────────┘
+│ │ YYYY-YYYY  已使用      │ │    [ 保存 / 系统分享 ]
+│ └──────────────────────┘ │
+│ [ 生成验证码 ]（房主，未满）  │
+└──────────────────────────┘
+```
+
+**⑦ 房主管理页（`/room/:id/manage`，仅自己的小屋）**
+
+```
+┌──────────────────────────┐
+│ ←  管理小屋                │
+│ 成员                       │
+│  🐱 昵称A       [移除]     │  → 二次确认弹窗
+│  🐶 昵称B       [移除]     │
+│ ─────────────────────── │
+│ [ 解散小屋 ]（红色，二次确认）│
+└──────────────────────────┘
+```
+
+**⑧ 我的 / 设置**
+
+```
+┌──────────────────────────┐
+│ 我的宠物 + 昵称 + MBTI      │
+├──────────────────────────┤
+│ 界面语言 / 母语            │
+│ 推送开关 · Widget 隐私模式  │
+│ 屏蔽列表                   │
+│ 隐私政策 · 用户协议         │
+│ 删除账号（二次确认）         │
+│ 退出登录                   │
+└──────────────────────────┘
+```
+
+**通用状态页（所有页面复用 `shared/widgets`）**：加载骨架屏、空态、断线“正在重连”顶部条（断线超过 3 秒才显示）、强制更新全屏页（`UPGRADE_REQUIRED`）、通用错误页（带重试）。
 
 ### 11.1 Onboarding
 
@@ -540,7 +962,7 @@ Android：Jetpack Glance（或 RemoteViews）读取共享存储渲染
 
 ### 19.4 环境配置（`--dart-define-from-file`）
 
-Flutter 没有 `.env` 机制，用 JSON 文件加 `--dart-define-from-file` 在构建时注入，代码里用 `String.fromEnvironment` 读取。统一封装在 `core/config/env.dart`，业务代码不直接读取。
+Flutter 没有 `.env` 机制，用 JSON 文件加 `--dart-define-from-file` 在构建时注入，代码里用 `String.fromEnvironment` 读取。统一封装在 `config/env.dart`，业务代码不直接读取。
 
 | 文件 | 用途 | 入库 |
 | :-- | :-- | :-- |
