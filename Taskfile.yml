@@ -1,0 +1,46 @@
+version: '3'
+
+# Windows has no make; this is the equivalent of the make commands in backend TRD 15.5.
+dotenv: ['.env']
+
+tasks:
+  up:
+    desc: Start Redis (Memurai) and check the PostgreSQL service
+    cmds:
+      - powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-redis.ps1
+      - powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-postgres.ps1
+
+  down:
+    desc: Stop the Redis (Memurai) process
+    cmds:
+      - powershell -NoProfile -Command "Get-Process memurai -ErrorAction SilentlyContinue | Stop-Process -Force; Write-Host 'Redis stopped.'"
+
+  migrate:
+    desc: Apply database migrations to the dev database
+    cmds:
+      - go run ./cmd/tools/migrate up
+
+  dev:
+    desc: Run the API
+    cmds:
+      - go run ./cmd/api
+
+  test:
+    desc: Unit tests (no external services)
+    cmds:
+      - go test -short ./...
+
+  test-int:
+    desc: All tests, including database and Redis tests
+    cmds:
+      - go test ./...
+
+  smoke:
+    desc: Hit /healthz and /readyz of a running API
+    cmds:
+      - powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1
+
+  lint:
+    desc: Static checks
+    cmds:
+      - go vet ./...
