@@ -1,0 +1,163 @@
+package db_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/jinheng0301/petbridge/internal/platform/db"
+	"github.com/jinheng0301/petbridge/internal/platform/db/dbtest"
+)
+
+var bg = context.Background()
+
+func sqlState(err error) string {
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		return pe.Code
+	}
+	if err == nil {
+		return ""
+	}
+	return "non-pg: " + err.Error()
+}
+
+func wantState(t *testing.T, err error, want string) {
+	t.Helper()
+	if got := sqlState(err); got != want {
+		t.Fatalf("SQLSTATE = %q, want %q (err=%v)", got, want, err)
+	}
+}
+
+func newUser(t *testing.T, p *pgxpool.Pool) string {
+	t.Helper()
+	var id string
+	if err := p.QueryRow(bg, `insert into users default values returning id::text`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func newRoom(t *testing.T, p *pgxpool.Pool, owner string) string {
+	t.Helper()
+	var id string
+	if err := p.QueryRow(bg, `insert into rooms(owner_id) values($1) returning id::text`, owner).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func addMember(p *pgxpool.Pool, room, user string, seat int) error {
+	_, err := p.Exec(bg, `insert into room_members(room_id,user_id,seat_no,role) values($1,$2,$3,'member')`, room, user, seat)
+	return err
+}
+
+func TestMigrateUp_Idempotent(t *testing.T) {
+	dbtest.Reset(t)
+	for i := 0; i < 2; i++ {
+		if err := db.MigrateUp(bg, dbtest.URL()); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+}
+
+func TestMigrateDownThenUp_RoundTrip(t *testing.T) {
+	p := dbtest.Reset(t)
+	if err := db.MigrateDown(bg, dbtest.URL()); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	err := p.QueryRow(bg, `select count(*) from information_schema.tables
+		where table_schema='public' and table_name <> 'goose_db_version'`).Scan(&n)
+	if err != nil || n != 0 {
+		t.Fatalf("tables left after down: %d (err=%v)", n, err)
+	}
+	if err := db.MigrateUp(bg, dbtest.URL()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrateStatus_ReportsApplied(t *testing.T) {
+	dbtest.Reset(t)
+	s, err := db.MigrateStatus(bg, dbtest.URL())
+	if err != nil || s == "" {
+		t.Fatalf("status=%q err=%v", s, err)
+	}
+}
+
+func TestRoomMembers_ActiveUniqueness(t *testing.T) {
+	p := dbtest.Reset(t)
+	room := newRoom(t, p, newUser(t, p))
+	u := newUser(t, p)
+	if err := addMember(p, room, u, 1); err != nil {
+		t.Fatal(err)
+	}
+	wantState(t, addMember(p, room, u, 2), "23505")
+	if _, err := p.Exec(bg, `update room_members set left_at=now(), left_reason='left' where room_id=$1 and user_id=$2`, room, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := addMember(p, room, u, 2); err != nil {
+		t.Fatalf("rejoin after leaving should work: %v", err)
+	}
+}
+
+func TestRoomMembers_SeatUniqueAmongActive(t *testing.T) {
+	p := dbtest.Reset(t)
+	room := newRoom(t, p, newUser(t, p))
+	if err := addMember(p, room, newUser(t, p), 1); err != nil {
+		t.Fatal(err)
+	}
+	wantState(t, addMember(p, room, newUser(t, p), 1), "23505")
+	wantState(t, addMember(p, room, newUser(t, p), 6), "23514")
+}
+
+func TestRoomMembers_LeftReasonConsistency(t *testing.T) {
+	p := dbtest.Reset(t)
+	room := newRoom(t, p, newUser(t, p))
+	_, err := p.Exec(bg, `insert into room_members(room_id,user_id,seat_no,role,left_at) values($1,$2,1,'member',now())`, room, newUser(t, p))
+	wantState(t, err, "23514")
+}
+
+func TestRooms_MemberCapCheck(t *testing.T) {
+	p := dbtest.Reset(t)
+	room := newRoom(t, p, newUser(t, p))
+	_, err := p.Exec(bg, `update rooms set member_count = 6 where id=$1`, room)
+	wantState(t, err, "23514")
+}
+
+func TestRooms_OneRoomPerOwner(t *testing.T) {
+	p := dbtest.Reset(t)
+	owner := newUser(t, p)
+	newRoom(t, p, owner)
+	_, err := p.Exec(bg, `insert into rooms(owner_id) values($1)`, owner)
+	wantState(t, err, "23505")
+}
+
+func TestInviteCodes_FormatCheck(t *testing.T) {
+	p := dbtest.Reset(t)
+	room := newRoom(t, p, newUser(t, p))
+	ins := func(code string) error {
+		_, err := p.Exec(bg, `insert into invite_codes(code,room_id,source,expires_at) values($1,$2,'zero',now()+interval '7 days')`, code, room)
+		return err
+	}
+	for _, ok := range []string{"DEVA2345", "FULL2345"} {
+		if err := ins(ok); err != nil {
+			t.Errorf("%s rejected: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"ABC0O1I2", "SHORT", "deva2345"} {
+		if got := sqlState(ins(bad)); got != "23514" {
+			t.Errorf("%s: SQLSTATE %q, want 23514", bad, got)
+		}
+	}
+}
+
+func TestUsers_ProfileColumnsNullableBeforeOnboarding(t *testing.T) {
+	p := dbtest.Reset(t)
+	newUser(t, p)
+	_, err := p.Exec(bg, `insert into users(native_lang) values('fr')`)
+	wantState(t, err, "23514")
+}
