@@ -66,8 +66,17 @@ func TestMigrateUp_Idempotent(t *testing.T) {
 
 func TestMigrateDownThenUp_RoundTrip(t *testing.T) {
 	p := dbtest.Reset(t)
-	if err := db.MigrateDown(bg, dbtest.URL()); err != nil {
-		t.Fatal(err)
+	for i := 0; i < 10; i++ { // roll back every migration, not just the latest
+		st, err := db.MigrateStatus(bg, dbtest.URL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st == "current version: 0" {
+			break
+		}
+		if err := db.MigrateDown(bg, dbtest.URL()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var n int
 	err := p.QueryRow(bg, `select count(*) from information_schema.tables
@@ -160,4 +169,21 @@ func TestUsers_ProfileColumnsNullableBeforeOnboarding(t *testing.T) {
 	newUser(t, p)
 	_, err := p.Exec(bg, `insert into users(native_lang) values('fr')`)
 	wantState(t, err, "23514")
+}
+
+func TestRefreshTokens_FamilyColumns(t *testing.T) {
+	p := dbtest.Reset(t)
+	u := newUser(t, p)
+	_, err := p.Exec(bg, `insert into refresh_tokens(user_id, token_hash, expires_at) values($1,'h1',now()+interval '1 day')`, u)
+	wantState(t, err, "23502") // family_id is not null
+	_, err = p.Exec(bg, `insert into refresh_tokens(user_id, token_hash, expires_at, family_id)
+		values($1,'h2',now()+interval '1 day', gen_random_uuid())`, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := p.QueryRow(bg, `select count(*) from information_schema.columns
+		where table_name='refresh_tokens' and column_name='replaced_by'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("replaced_by column: n=%d err=%v", n, err)
+	}
 }
