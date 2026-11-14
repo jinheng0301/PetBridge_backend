@@ -17,12 +17,22 @@ import (
 
 const shutdownTimeout = 10 * time.Second
 
-// NewRouter wires middleware (RequestID -> AccessLog -> Recovery) and routes.
-func NewRouter(l *slog.Logger, h *health.Handler) *gin.Engine {
+// Module is a business package that mounts its routes under /api/v1.
+type Module interface {
+	Routes(v1 *gin.RouterGroup)
+}
+
+// NewRouter wires middleware (RequestID -> AccessLog -> Recovery), the probe
+// routes and every module's routes under /api/v1.
+func NewRouter(l *slog.Logger, h *health.Handler, mods ...Module) *gin.Engine {
 	r := gin.New()
 	r.Use(httpx.RequestID(), httpx.AccessLog(l), httpx.Recovery(l))
 	r.GET("/healthz", h.Healthz)
 	r.GET("/readyz", h.Readyz)
+	v1 := r.Group("/api/v1")
+	for _, m := range mods {
+		m.Routes(v1)
+	}
 	return r
 }
 

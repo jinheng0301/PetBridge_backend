@@ -1,8 +1,12 @@
 openapi: 3.0.3
 info:
   title: PetBridge API
-  version: 0.1.0
-  description: Draft. Business endpoints under /api/v1 arrive from B2 onward.
+  version: 0.2.0
+  description: >
+    B2: health probes, authentication (dev login, Apple/Google stubs, refresh, logout)
+    and onboarding. Rooms, invite codes and messages arrive from B3 onward.
+    Every business path lives under /api/v1; probes do not.
+    Success bodies are {"data": ...}; failures are {"error": {code, message, request_id, details?}}.
 paths:
   /healthz:
     get:
@@ -46,7 +50,188 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/v1/auth/login/dev:
+    post:
+      tags: [auth]
+      summary: Development login by email
+      description: >
+        Local development only. The route exists only when APP_ENV=local and DEV_LOGIN_ENABLED=true;
+        otherwise it returns 404. An unknown email creates a new (not yet onboarded) user.
+        The email is trimmed and lower-cased. Seed emails: dev-a@local .. dev-f@local.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, maxLength: 254, example: dev-a@local }
+      responses:
+        '200': { $ref: '#/components/responses/LoginOK' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/auth/login/apple:
+    post:
+      tags: [auth]
+      summary: Sign in with Apple
+      description: Not available yet; returns 501 PROVIDER_NOT_CONFIGURED until real verification is wired up.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IDTokenRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/LoginOK' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '501': { $ref: '#/components/responses/ProviderNotConfigured' }
+  /api/v1/auth/login/google:
+    post:
+      tags: [auth]
+      summary: Sign in with Google
+      description: Not available yet; returns 501 PROVIDER_NOT_CONFIGURED until real verification is wired up.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IDTokenRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/LoginOK' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '501': { $ref: '#/components/responses/ProviderNotConfigured' }
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate the refresh token
+      description: >
+        Returns a new access token and a new refresh token; the old refresh token stops working.
+        Presenting an already-used refresh token revokes the whole token family (REFRESH_REUSED).
+        Clients should refresh with a single in-flight request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/LoginOK' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401':
+          description: REFRESH_INVALID (unknown or expired) or REFRESH_REUSED (replay; family revoked). Log the user out.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke a refresh token family
+      description: >
+        Idempotent; unknown tokens also return 204. The access token stays valid until it expires
+        (default 15 minutes).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '204': { description: Logged out }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/me:
+    get:
+      tags: [me]
+      summary: Current user
+      description: Use `onboarded` to decide whether to show the onboarding flow.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The caller's profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Profile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/me/onboarding:
+    post:
+      tags: [me]
+      summary: Complete onboarding
+      description: >
+        In one transaction: saves the profile, binds the pet for the MBTI type, creates the caller's own
+        room (seat 1) and issues one signup invite code. Idempotent: if the caller is already onboarded
+        the existing result is returned and the request body is ignored.
+        Invalid fields return 400 VALIDATION_FAILED with error.details.fields listing field names.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OnboardingRequest' }
+      responses:
+        '200':
+          description: Onboarding result (also returned on repeat calls)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/OnboardingResult' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/Internal' }
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    LoginOK:
+      description: Tokens and the signed-in user
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data: { $ref: '#/components/schemas/LoginData' }
+    ValidationFailed:
+      description: VALIDATION_FAILED. Malformed, oversized (over 64 KB) or invalid body.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: UNAUTHORIZED. Missing, malformed, expired or invalid credentials.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    AccountDisabled:
+      description: ACCOUNT_DISABLED. The account is banned or deleted.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ProviderNotConfigured:
+      description: PROVIDER_NOT_CONFIGURED. This login provider is not available yet.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Internal:
+      description: INTERNAL.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
   schemas:
     Error:
       type: object
@@ -56,6 +241,105 @@ components:
           type: object
           required: [code, message, request_id]
           properties:
-            code: { type: string, example: NOT_READY }
-            message: { type: string }
+            code:
+              type: string
+              example: NOT_READY
+              description: >
+                One of NOT_READY, INTERNAL, UNAUTHORIZED, VALIDATION_FAILED, ACCOUNT_DISABLED,
+                REFRESH_INVALID, REFRESH_REUSED, PROVIDER_NOT_CONFIGURED.
+            message: { type: string, description: 'For debugging only; localise by code.' }
             request_id: { type: string }
+            details:
+              type: object
+              description: Present on VALIDATION_FAILED from onboarding.
+              properties:
+                fields:
+                  type: array
+                  items: { type: string }
+    IDTokenRequest:
+      type: object
+      required: [id_token]
+      properties:
+        id_token: { type: string, maxLength: 8192 }
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+    LoginData:
+      type: object
+      required: [access_token, refresh_token, expires_in, user]
+      properties:
+        access_token: { type: string, description: 'JWT; send as "Authorization: Bearer ..."' }
+        refresh_token: { type: string }
+        expires_in: { type: integer, description: 'Access token lifetime in seconds.' }
+        user:
+          type: object
+          required: [id, onboarded]
+          properties:
+            id: { type: string, format: uuid }
+            onboarded: { type: boolean }
+    Profile:
+      type: object
+      required: [id, onboarded]
+      properties:
+        id: { type: string, format: uuid }
+        nickname: { type: string, nullable: true }
+        native_lang: { type: string, nullable: true, enum: [ja, ko, zh-Hant, zh-Hans, en] }
+        mbti: { type: string, nullable: true, example: ENFP }
+        pet_type: { type: string, nullable: true, example: happy_shiba }
+        age_band: { type: string, nullable: true, enum: [13_17, 18_plus] }
+        tz: { type: string, nullable: true, example: Asia/Tokyo }
+        onboarded: { type: boolean }
+    OnboardingRequest:
+      type: object
+      required: [native_lang, mbti, nickname, age_band, tz]
+      properties:
+        native_lang: { type: string, enum: [ja, ko, zh-Hant, zh-Hans, en] }
+        mbti: { type: string, pattern: '^[EI][NS][TF][JP]$', description: 'Upper case, e.g. ENFP.' }
+        nickname: { type: string, description: 'Trimmed; 1 to 20 characters; no control characters.' }
+        age_band: { type: string, enum: [13_17, 18_plus], description: 'Under-13 users must be stopped by the client.' }
+        tz: { type: string, description: 'IANA time zone name, e.g. Asia/Tokyo.', example: Asia/Tokyo }
+    OnboardingResult:
+      type: object
+      required: [user, pet, room, invite_code]
+      properties:
+        user: { $ref: '#/components/schemas/Profile' }
+        pet:
+          type: object
+          required: [type, mbti]
+          properties:
+            type:
+              type: string
+              description: Stable pet slug; display names live in the client's i18n.
+              enum:
+                - lone_leopard
+                - leader_lion
+                - thinker_owl
+                - clever_fox
+                - guardian_deer
+                - guide_dolphin
+                - healing_rabbit
+                - happy_shiba
+                - steady_beaver
+                - order_sheepdog
+                - guardian_penguin
+                - warm_otter
+                - calm_blackcat
+                - daring_falcon
+                - easygoing_alpaca
+                - party_parrot
+            mbti: { type: string }
+        room:
+          type: object
+          required: [id, member_count, capacity]
+          properties:
+            id: { type: string, format: uuid }
+            member_count: { type: integer }
+            capacity: { type: integer }
+        invite_code:
+          type: object
+          required: [code, expires_at]
+          properties:
+            code: { type: string, description: '8 characters, no hyphen; format as XXXX-XXXX for display.', example: 98NX5RW3 }
+            expires_at: { type: string, format: date-time }
