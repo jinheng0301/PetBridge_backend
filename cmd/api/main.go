@@ -9,15 +9,18 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/jinheng0301/petbridge/internal/auth"
 	"github.com/jinheng0301/petbridge/internal/config"
 	"github.com/jinheng0301/petbridge/internal/health"
 	"github.com/jinheng0301/petbridge/internal/httpx"
 	"github.com/jinheng0301/petbridge/internal/platform/db"
 	pbredis "github.com/jinheng0301/petbridge/internal/platform/redis"
 	"github.com/jinheng0301/petbridge/internal/server"
+	"github.com/jinheng0301/petbridge/internal/user"
 )
 
 func main() {
@@ -68,7 +71,11 @@ func main() {
 			return pbredis.Ping(c, rdb)
 		},
 	)
-	router := server.NewRouter(log, h)
+	issuer := auth.NewIssuer(cfg.JWTSigningKey, cfg.AccessTokenTTL, time.Now)
+	authSvc := auth.NewService(pool, issuer, cfg.RefreshTokenTTL)
+	authHandler := auth.NewHandler(authSvc, cfg.DevLoginEnabled, auth.NotConfiguredVerifier{}, auth.NotConfiguredVerifier{})
+	userHandler := user.NewHandler(user.NewService(pool, cfg.CodeTTLDays, time.Now), auth.Middleware(issuer))
+	router := server.NewRouter(log, h, authHandler, userHandler)
 
 	log.Info("starting api", "app_env", cfg.AppEnv, "port", cfg.AppPort)
 	if err := server.Run(ctx, ":"+strconv.Itoa(cfg.AppPort), router, log); err != nil {
