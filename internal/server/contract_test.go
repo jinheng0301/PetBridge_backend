@@ -9,10 +9,11 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3"
 
-	"github.com/jinheng0301/petbridge/internal/auth"
-	"github.com/jinheng0301/petbridge/internal/health"
-	"github.com/jinheng0301/petbridge/internal/httpx"
-	"github.com/jinheng0301/petbridge/internal/user"
+	"github.com/jinheng0301/petbridge/internal/handler"
+	"github.com/jinheng0301/petbridge/internal/middleware"
+	"github.com/jinheng0301/petbridge/internal/platform/logger"
+	"github.com/jinheng0301/petbridge/internal/service"
+	"github.com/jinheng0301/petbridge/pkg/idtoken"
 )
 
 const specPath = "../../api/openapi.yaml"
@@ -37,10 +38,10 @@ func TestOpenAPI_DocumentIsValid(t *testing.T) {
 func TestOpenAPI_RoutesMatchDocument(t *testing.T) {
 	probe := func(context.Context) error { return nil }
 	// Handlers are never invoked here, so nil services are fine.
-	iss := auth.NewIssuer("k", time.Minute, time.Now)
-	r := NewRouter(httpx.NewLogger("error", &strings.Builder{}), health.New(probe, probe),
-		auth.NewHandler(nil, true, auth.NotConfiguredVerifier{}, auth.NotConfiguredVerifier{}),
-		user.NewHandler(nil, auth.Middleware(iss)))
+	iss := service.NewIssuer("k", time.Minute, time.Now)
+	r := NewRouter(logger.New("error", &strings.Builder{}), handler.NewHealthHandler(probe, probe),
+		handler.NewAuthHandler(nil, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}),
+		handler.NewUserHandler(nil, middleware.Auth(iss)))
 
 	routes := map[string]bool{}
 	for _, ri := range r.Routes() {

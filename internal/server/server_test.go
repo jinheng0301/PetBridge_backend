@@ -13,8 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/jinheng0301/petbridge/internal/health"
-	"github.com/jinheng0301/petbridge/internal/httpx"
+	"github.com/jinheng0301/petbridge/internal/handler"
+	"github.com/jinheng0301/petbridge/internal/platform/logger"
 )
 
 func init() { gin.SetMode(gin.TestMode) }
@@ -24,7 +24,7 @@ func quietLogger() *bytes.Buffer { return &bytes.Buffer{} }
 func okProbe(context.Context) error { return nil }
 
 func TestRouter_RequestIDOnEveryResponse(t *testing.T) {
-	r := NewRouter(httpx.NewLogger("debug", quietLogger()), health.New(okProbe, okProbe))
+	r := NewRouter(logger.New("debug", quietLogger()), handler.NewHealthHandler(okProbe, okProbe))
 	for _, path := range []string{"/healthz", "/readyz", "/nope"} {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
@@ -53,7 +53,7 @@ func TestRun_GracefulShutdown(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
-	go func() { runErr <- Run(ctx, addr, slow, httpx.NewLogger("debug", quietLogger())) }()
+	go func() { runErr <- Run(ctx, addr, slow, logger.New("debug", quietLogger())) }()
 
 	// wait until the server accepts connections
 	for i := 0; i < 50; i++ {
@@ -103,7 +103,7 @@ func TestRun_PortInUse_ReturnsError(t *testing.T) {
 	defer l.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(context.Background(), l.Addr().String(), http.NewServeMux(), httpx.NewLogger("debug", quietLogger()))
+		done <- Run(context.Background(), l.Addr().String(), http.NewServeMux(), logger.New("debug", quietLogger()))
 	}()
 	select {
 	case err := <-done:

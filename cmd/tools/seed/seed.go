@@ -7,8 +7,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jinheng0301/petbridge/internal/auth"
-	"github.com/jinheng0301/petbridge/internal/user"
+	"github.com/jinheng0301/petbridge/internal/model"
+	"github.com/jinheng0301/petbridge/internal/repository"
+	"github.com/jinheng0301/petbridge/internal/service"
 )
 
 const (
@@ -19,24 +20,28 @@ const (
 
 type seedUser struct {
 	email string
-	in    user.OnboardingInput
+	in    model.OnboardingInput
 }
 
 var seedUsers = []seedUser{
-	{"dev-a@local", user.OnboardingInput{NativeLang: "ja", MBTI: "ENFP", Nickname: "Dev A", AgeBand: "18_plus", TZ: "Asia/Tokyo"}},
-	{"dev-b@local", user.OnboardingInput{NativeLang: "ko", MBTI: "INFP", Nickname: "Dev B", AgeBand: "18_plus", TZ: "Asia/Seoul"}},
-	{"dev-c@local", user.OnboardingInput{NativeLang: "zh-Hant", MBTI: "INTJ", Nickname: "Dev C", AgeBand: "18_plus", TZ: "Asia/Taipei"}},
-	{"dev-d@local", user.OnboardingInput{NativeLang: "zh-Hans", MBTI: "ESTJ", Nickname: "Dev D", AgeBand: "18_plus", TZ: "Asia/Shanghai"}},
-	{"dev-e@local", user.OnboardingInput{NativeLang: "en", MBTI: "ISFP", Nickname: "Dev E", AgeBand: "18_plus", TZ: "Europe/London"}},
-	{"dev-f@local", user.OnboardingInput{NativeLang: "en", MBTI: "ESFP", Nickname: "Dev F", AgeBand: "13_17", TZ: "Europe/London"}},
+	{"dev-a@local", model.OnboardingInput{NativeLang: "ja", MBTI: "ENFP", Nickname: "Dev A", AgeBand: "18_plus", TZ: "Asia/Tokyo"}},
+	{"dev-b@local", model.OnboardingInput{NativeLang: "ko", MBTI: "INFP", Nickname: "Dev B", AgeBand: "18_plus", TZ: "Asia/Seoul"}},
+	{"dev-c@local", model.OnboardingInput{NativeLang: "zh-Hant", MBTI: "INTJ", Nickname: "Dev C", AgeBand: "18_plus", TZ: "Asia/Taipei"}},
+	{"dev-d@local", model.OnboardingInput{NativeLang: "zh-Hans", MBTI: "ESTJ", Nickname: "Dev D", AgeBand: "18_plus", TZ: "Asia/Shanghai"}},
+	{"dev-e@local", model.OnboardingInput{NativeLang: "en", MBTI: "ISFP", Nickname: "Dev E", AgeBand: "18_plus", TZ: "Europe/London"}},
+	{"dev-f@local", model.OnboardingInput{NativeLang: "en", MBTI: "ESFP", Nickname: "Dev F", AgeBand: "13_17", TZ: "Europe/London"}},
 }
 
 // Run creates the six seed users through the real onboarding path and the
 // zero code DEVA2345 on user A's room. It is safe to run repeatedly.
 func Run(ctx context.Context, pool *pgxpool.Pool, now func() time.Time) error {
 	// Seed never needs a usable token; the issuer is a throwaway.
-	authSvc := auth.NewService(pool, auth.NewIssuer("seed-throwaway-key-seed-throwaway", time.Minute, now), time.Hour)
-	userSvc := user.NewService(pool, seedCodeTTL, now)
+	tx := repository.NewTxManager(pool)
+	users := repository.NewUserRepo(pool)
+	codes := repository.NewInviteCodeRepo(pool)
+	authSvc := service.NewAuthService(users, repository.NewAuthIdentityRepo(pool), repository.NewRefreshTokenRepo(pool), tx,
+		service.NewIssuer("seed-throwaway-key-seed-throwaway", time.Minute, now), time.Hour)
+	userSvc := service.NewUserService(users, repository.NewRoomRepo(pool), repository.NewRoomMemberRepo(pool), codes, tx, seedCodeTTL, now)
 
 	var aRoom string
 	for _, s := range seedUsers {
@@ -52,7 +57,5 @@ func Run(ctx context.Context, pool *pgxpool.Pool, now func() time.Time) error {
 			aRoom = res.Room.ID
 		}
 	}
-	_, err := pool.Exec(ctx, `insert into invite_codes(code, room_id, source, expires_at) values($1,$2,'zero',$3)
-		on conflict (code) do nothing`, zeroCode, aRoom, now().Add(zeroCodeLife))
-	return err
+	return codes.InsertZero(ctx, zeroCode, aRoom, now().Add(zeroCodeLife))
 }

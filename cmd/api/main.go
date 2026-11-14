@@ -13,14 +13,16 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/jinheng0301/petbridge/internal/auth"
 	"github.com/jinheng0301/petbridge/internal/config"
-	"github.com/jinheng0301/petbridge/internal/health"
-	"github.com/jinheng0301/petbridge/internal/httpx"
+	"github.com/jinheng0301/petbridge/internal/handler"
+	"github.com/jinheng0301/petbridge/internal/middleware"
 	"github.com/jinheng0301/petbridge/internal/platform/db"
+	"github.com/jinheng0301/petbridge/internal/platform/logger"
 	pbredis "github.com/jinheng0301/petbridge/internal/platform/redis"
+	"github.com/jinheng0301/petbridge/internal/repository"
 	"github.com/jinheng0301/petbridge/internal/server"
-	"github.com/jinheng0301/petbridge/internal/user"
+	"github.com/jinheng0301/petbridge/internal/service"
+	"github.com/jinheng0301/petbridge/pkg/idtoken"
 )
 
 func main() {
@@ -38,7 +40,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := httpx.NewLogger(cfg.LogLevel, os.Stdout)
+	log := logger.New(cfg.LogLevel, os.Stdout)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -62,7 +64,7 @@ func main() {
 		defer rdb.Close()
 	}
 
-	h := health.New(
+	health := handler.NewHealthHandler(
 		func(c context.Context) error { return db.Ping(c, pool) },
 		func(c context.Context) error {
 			if rdb == nil {
@@ -71,11 +73,19 @@ func main() {
 			return pbredis.Ping(c, rdb)
 		},
 	)
-	issuer := auth.NewIssuer(cfg.JWTSigningKey, cfg.AccessTokenTTL, time.Now)
-	authSvc := auth.NewService(pool, issuer, cfg.RefreshTokenTTL)
-	authHandler := auth.NewHandler(authSvc, cfg.DevLoginEnabled, auth.NotConfiguredVerifier{}, auth.NotConfiguredVerifier{})
-	userHandler := user.NewHandler(user.NewService(pool, cfg.CodeTTLDays, time.Now), auth.Middleware(issuer))
-	router := server.NewRouter(log, h, authHandler, userHandler)
+
+	// repository -> service -> handler
+	tx := repository.NewTxManager(pool)
+	users := repository.NewUserRepo(pool)
+	issuer := service.NewIssuer(cfg.JWTSigningKey, cfg.AccessTokenTTL, time.Now)
+	authSvc := service.NewAuthService(users, repository.NewAuthIdentityRepo(pool),
+		repository.NewRefreshTokenRepo(pool), tx, issuer, cfg.RefreshTokenTTL)
+	userSvc := service.NewUserService(users, repository.NewRoomRepo(pool), repository.NewRoomMemberRepo(pool),
+		repository.NewInviteCodeRepo(pool), tx, cfg.CodeTTLDays, time.Now)
+
+	authHandler := handler.NewAuthHandler(authSvc, cfg.DevLoginEnabled, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{})
+	userHandler := handler.NewUserHandler(userSvc, middleware.Auth(issuer))
+	router := server.NewRouter(log, health, authHandler, userHandler)
 
 	log.Info("starting api", "app_env", cfg.AppEnv, "port", cfg.AppPort)
 	if err := server.Run(ctx, ":"+strconv.Itoa(cfg.AppPort), router, log); err != nil {

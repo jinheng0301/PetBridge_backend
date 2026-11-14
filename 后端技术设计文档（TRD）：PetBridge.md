@@ -192,7 +192,7 @@ flowchart LR
     Entry --> T --> S
     S --> R --> P
     S --> PK
-    MW -.->|"仅依赖 AuthService 接口"| S
+    MW -.->|"仅依赖 TokenParser 接口"| S
     H -.-> M
     S -.-> M
     R -.-> M
@@ -210,7 +210,7 @@ flowchart LR
 | platform | `internal/platform` | 数据库连接池、Redis 客户端、asynq 队列、对象存储、时钟等基础设施 | 不含业务概念 |
 | pkg | `pkg/*` | 与业务无关、可复用的外部能力封装（LLM 供应商、机翻、FCM、Apple/Google ID Token 校验、敏感词自动机） | 不依赖 `internal/*` |
 
-**依赖规则（单向）：** `handler / task → service → repository → platform`；`model` 被所有层引用但自身不引用任何层；`middleware` 只依赖 `service` 里定义的接口（如 `AuthService.ValidateAccessToken`）；`service` 之间通过接口通信，禁止循环依赖，例如 `chat_service` 只依赖 `Translator`、`Publisher` 接口，不依赖具体的 `ai_service`。
+**依赖规则（单向）：** `handler / task → service → repository → platform`；`model` 被所有层引用但自身不引用任何层；`middleware` 只依赖自己声明的小接口（如 `TokenParser`，由 `service.Issuer` 满足），写错误响应时复用 `handler` 的 `Fail`；`handler` 不反向依赖 `middleware`，请求ID、用户ID 通过 `model` 里的上下文键常量在两者之间传递；`service` 之间通过接口通信，禁止循环依赖，例如 `chat_service` 只依赖 `Translator`、`Publisher` 接口，不依赖具体的 `ai_service`。
 
 ### 4.4 路由分组与鉴权
 
@@ -364,6 +364,10 @@ petbridge/
 │   │   ├── auth_service.go            # ID Token 校验、JWT 签发/校验、刷新令牌轮换
 │   │   ├── user_service.go            # 用户、onboarding 事务、MBTI→宠物映射
 │   │   ├── invite_service.go          # 验证码生成、校验、奖励发放（核心）
+│   │   ├── token_service.go           # JWT Issuer（签发/校验 access token）、刷新令牌生成与哈希
+│   │   ├── pet.go                     # MBTI → 宠物映射
+│   │   ├── errors.go                  # 业务哨兵错误（ErrAccountDisabled 等）、ValidationError
+│   │   ├── ports.go                   # service 依赖的 repository 接口（TxRunner、UserStore 等）
 │   │   ├── room_service.go            # 入房事务、成员、房主管理（踢人/解散/补码）
 │   │   ├── chat_service.go            # 消息同步段：校验、审核、幂等落库、入队
 │   │   ├── checkin_service.go         # 打卡、能量、装扮解锁
@@ -399,8 +403,9 @@ petbridge/
 │   │   ├── message.go                 # Message、Delivery
 │   │   ├── checkin.go
 │   │   ├── safety.go
+│   │   ├── auth.go                    # Tokens、LoginResult 等认证相关 DTO
 │   │   ├── event.go                   # WS 帧与事件负载（对应第 9 章）
-│   │   └── errcode.go                 # 业务错误码（对应第 8 章）
+│   │   └── errcode.go                 # 业务错误码（对应第 8 章）、上下文键常量、ErrNotFound / ErrAlreadyExists
 │   ├── middleware/
 │   │   ├── request_id_middleware.go
 │   │   ├── logger_middleware.go       # slog JSON 日志
@@ -417,6 +422,7 @@ petbridge/
 │   │   └── scheduler.go               # 定时任务注册
 │   └── platform/                      # 基础设施
 │       ├── db/                        # pgx 连接池、迁移执行
+│       ├── logger/                    # slog JSON 日志构造
 │       ├── redis/
 │       ├── queue/                     # asynq client / server 封装
 │       ├── storage/                   # S3 兼容存储
@@ -425,7 +431,7 @@ petbridge/
 │   ├── llm/                           # Translator / Polisher 接口 + 各供应商实现 + gobreaker
 │   ├── mt/                            # 机器翻译兜底
 │   ├── fcm/                           # FCM HTTP v1 封装
-│   ├── idtoken/                       # Apple / Google ID Token 校验
+│   ├── idtoken/                       # Apple / Google ID Token 校验（Verifier 接口；真实实现待开发者账号）
 │   └── wordfilter/                    # Aho-Corasick 敏感词自动机（按语言分库）
 ├── db/
 │   ├── migrations/                    # goose SQL
