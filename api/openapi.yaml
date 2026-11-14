@@ -1,0 +1,61 @@
+openapi: 3.0.3
+info:
+  title: PetBridge API
+  version: 0.1.0
+  description: Draft. Business endpoints under /api/v1 arrive from B2 onward.
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe (does not check dependencies)
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status: { type: string, enum: [ok] }
+  /readyz:
+    get:
+      summary: Readiness probe
+      description: >
+        PostgreSQL down returns 503. Redis down still returns 200 with status "degraded",
+        because Redis failure must not stop message delivery.
+      responses:
+        '200':
+          description: Ready, or degraded (Redis down)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status: { type: string, enum: [ok, degraded] }
+                      redis: { type: string, enum: [down] }
+        '503':
+          description: PostgreSQL unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: { type: string, example: NOT_READY }
+            message: { type: string }
+            request_id: { type: string }
