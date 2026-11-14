@@ -20,6 +20,11 @@ tasks:
     cmds:
       - go run ./cmd/tools/migrate up
 
+  seed:
+    desc: Write local test data (6 users + zero code DEVA2345); APP_ENV=local only
+    cmds:
+      - go run ./cmd/tools/seed
+
   dev:
     desc: Run the API
     cmds:
@@ -33,7 +38,7 @@ tasks:
   test-int:
     desc: All tests, including database and Redis tests
     cmds:
-      - go test ./...
+      - go test -p 1 ./...
 
   smoke:
     desc: Hit /healthz and /readyz of a running API

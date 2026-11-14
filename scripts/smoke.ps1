@@ -1,5 +1,5 @@
-# Smoke test: /healthz and /readyz must both return 200.
-# From B2 on this grows into: login -> onboarding -> join room -> send message.
+# Smoke test: /healthz and /readyz must return 200, then (when dev login is
+# enabled) login -> onboarding -> GET /me. Later batches add join room -> send message.
 $ErrorActionPreference = 'Stop'
 
 # Port: APP_PORT from the environment, else from .env, else 8080.
@@ -23,3 +23,23 @@ foreach ($path in '/healthz', '/readyz') {
     }
 }
 if ($failed) { exit 1 }
+
+# B2 flow: needs DEV_LOGIN_ENABLED=true (APP_ENV=local).
+$base = "http://localhost:$port/api/v1"
+$email = "smoke-$([guid]::NewGuid().ToString('N').Substring(0,8))@local"
+try {
+    $login = Invoke-RestMethod -Method Post -Uri "$base/auth/login/dev" -ContentType 'application/json' `
+        -Body (@{ email = $email } | ConvertTo-Json) -TimeoutSec 5
+    $headers = @{ Authorization = "Bearer $($login.data.access_token)" }
+    $body = @{ native_lang = 'ja'; mbti = 'ENFP'; nickname = 'Smoke'; age_band = '18_plus'; tz = 'Asia/Tokyo' } | ConvertTo-Json
+    $ob = Invoke-RestMethod -Method Post -Uri "$base/me/onboarding" -ContentType 'application/json' -Headers $headers -Body $body -TimeoutSec 5
+    $me = Invoke-RestMethod -Method Get -Uri "$base/me" -Headers $headers -TimeoutSec 5
+    if (-not $me.data.onboarded -or $me.data.pet_type -ne 'happy_shiba') {
+        Write-Host "FAIL /me unexpected: $($me.data | ConvertTo-Json -Compress)"
+        exit 1
+    }
+    Write-Host "OK login -> onboarding -> /me ($email, pet=$($me.data.pet_type), invite=$($ob.data.invite_code.code))"
+} catch {
+    Write-Host "FAIL auth flow: $($_.Exception.Message)"
+    exit 1
+}
