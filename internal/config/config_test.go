@@ -131,3 +131,26 @@ func TestLoad_InvalidValues(t *testing.T) {
 		t.Errorf("APP_PORT=70000 not reported: %s", p)
 	}
 }
+
+func TestLoad_CodeTTLDaysDefault(t *testing.T) {
+	c, err := Load(env(required()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CodeTTLDays != 7 {
+		t.Fatalf("CodeTTLDays = %d, want 7", c.CodeTTLDays)
+	}
+}
+
+func TestLoad_CodeTTLDaysInvalid(t *testing.T) {
+	for _, v := range []string{"0", "366", "abc"} {
+		_, err := Load(env(with(required(), "CODE_TTL_DAYS", v)))
+		p := problems(t, err)
+		if !strings.Contains(p, "CODE_TTL_DAYS") {
+			t.Errorf("value %q: problems %q should name CODE_TTL_DAYS", v, p)
+		}
+		if strings.Contains(p, v) && v != "0" {
+			t.Errorf("value %q leaked into problems %q", v, p)
+		}
+	}
+}

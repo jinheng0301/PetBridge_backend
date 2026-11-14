@@ -22,6 +22,7 @@ type Config struct {
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
 	DevLoginEnabled bool
+	CodeTTLDays     int
 	AIProvider      string
 }
 
@@ -90,6 +91,12 @@ func Load(getenv func(string) string) (*Config, error) {
 
 	c.AccessTokenTTL = duration("ACCESS_TOKEN_TTL", "15m")
 	c.RefreshTokenTTL = duration("REFRESH_TOKEN_TTL", "720h")
+
+	ttlDays, err := strconv.Atoi(get("CODE_TTL_DAYS", "7"))
+	if err != nil || ttlDays < 1 || ttlDays > 365 {
+		add("CODE_TTL_DAYS must be an integer between 1 and 365")
+	}
+	c.CodeTTLDays = ttlDays
 
 	dev, err := strconv.ParseBool(get("DEV_LOGIN_ENABLED", "false"))
 	if err != nil {
