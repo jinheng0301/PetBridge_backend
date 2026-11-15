@@ -119,7 +119,12 @@ const maxCodeAttempts = 5
 
 // loadProfile loads a profile and applies the account-status rule.
 func (s *UserService) loadProfile(ctx context.Context, userID string, lock bool) (model.Profile, error) {
-	p, status, err := s.users.LoadProfile(ctx, userID, lock)
+	return profileOf(s.users.LoadProfile(ctx, userID, lock))
+}
+
+// profileOf applies the account-status rule to a UserStore.LoadProfile result:
+// a missing user is ErrUserNotFound, a non-active one ErrAccountDisabled.
+func profileOf(p model.Profile, status string, err error) (model.Profile, error) {
 	if errors.Is(err, model.ErrNotFound) {
 		return model.Profile{}, ErrUserNotFound
 	}
