@@ -864,7 +864,8 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 
 ```env
 # ===== 运行环境 =====
-APP_ENV=local                  # local | staging | production
+APP_ENV=local                  # 必填：local | staging | production
+APP_HOST=127.0.0.1             # local 默认仅本机；其余环境默认 0.0.0.0
 APP_PORT=8080
 LOG_LEVEL=debug                # debug | info | warn
 
@@ -923,7 +924,14 @@ OWNER_REGEN_DAILY_LIMIT=3       # 房主每日自助补码上限
 
 - `.env` 写进 `.gitignore`；`.env.example` 只放占位和本地默认值，不含任何真实密钥。
 - 密钥不进日志、不进镜像。
-- `APP_ENV=production` 时启动自检：`DEV_LOGIN_ENABLED` 必须为 false、`AI_PROVIDER` 必须为 live、`JWT_SIGNING_KEY` 长度不少于 32，任一不满足就拒绝启动。
+- 启动自检，任一不满足就拒绝启动：
+  - `APP_ENV` 必填且只能是 `local | staging | production`，**不设默认值**（缺失时若默认成 local 会悄悄放宽下面的检查）。
+  - 非 local：`DEV_LOGIN_ENABLED` 必须为 false、`JWT_SIGNING_KEY` 不少于 32 位、`DATABASE_URL` 不得使用 `sslmode=disable`。
+  - `production`：`AI_PROVIDER` 必须为 live。
+- 监听地址 `APP_HOST`：local 默认 `127.0.0.1`（开发登录无需密码，不应暴露到局域网），其余环境默认 `0.0.0.0`。
+- 鉴权：每个受保护请求在验签后都会查一次 `users.status`，被封号或删除的账号立即失效（返回 403 `ACCOUNT_DISABLED`），不等 access token 过期。
+- 反向代理：路由默认**不信任任何代理**（`X-Forwarded-For` 可被客户端伪造）。部署到 Caddy 后面时必须把代理地址加入可信列表，否则按 IP 限流会把所有用户算成同一个 IP。
+- HTTP 服务设置了 `ReadTimeout` 与 `IdleTimeout`，刻意不设 `WriteTimeout`（会切断 WebSocket）；实现 WebSocket 时需确认被接管连接上的读超时已清除。
 
 ### 15.5 本地开发环境
 
