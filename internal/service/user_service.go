@@ -43,18 +43,49 @@ func ValidateOnboarding(in model.OnboardingInput) []string {
 	return bad
 }
 
+// invisibleFillers render as blank but are letters/symbols, so neither
+// IsControl, Cf nor TrimSpace catches them: Hangul fillers (relevant for KR
+// users) and the Braille blank. A nickname made of them looks empty.
+var invisibleFillers = map[rune]bool{0x115F: true, 0x1160: true, 0x3164: true, 0xFFA0: true, 0x2800: true}
+
+const (
+	zwj = '‍' // zero-width joiner
+	vs  = '️' // emoji variation selector
+)
+
 func validNickname(n string) bool {
 	if n == "" || utf8.RuneCountInString(n) > maxNicknameLen {
 		return false
 	}
-	for _, r := range n {
-		// Cf covers bidi overrides and zero-width characters, which can be
-		// used to impersonate other users in chat.
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+	rs := []rune(n)
+	for i, r := range rs {
+		switch {
+		case unicode.IsControl(r), invisibleFillers[r]:
+			return false
+		case r == zwj:
+			// Only as the glue inside an emoji sequence (family, flag, skin tone).
+			// Between letters it is invisible and would let "Bob" and "Bo<ZWJ>b"
+			// look identical.
+			if !joinsEmoji(rs, i) {
+				return false
+			}
+		case unicode.Is(unicode.Cf, r):
+			// Bidi overrides, other zero-width characters: used to impersonate
+			// other users in chat.
 			return false
 		}
 	}
 	return true
+}
+
+// joinsEmoji reports whether the ZWJ at rs[i] sits between two emoji.
+func joinsEmoji(rs []rune, i int) bool {
+	if i == 0 || i == len(rs)-1 {
+		return false
+	}
+	prev, next := rs[i-1], rs[i+1]
+	prevOK := unicode.Is(unicode.So, prev) || unicode.Is(unicode.Sk, prev) || prev == vs
+	return prevOK && unicode.Is(unicode.So, next)
 }
 
 // validTZ rejects "" and "Local", which time.LoadLocation accepts.
