@@ -187,3 +187,27 @@ func TestRefreshTokens_FamilyColumns(t *testing.T) {
 		t.Fatalf("replaced_by column: n=%d err=%v", n, err)
 	}
 }
+
+func TestMigration0003_AddsRewardForColumn(t *testing.T) {
+	p := dbtest.Reset(t)
+	var nullable string
+	var refs int
+	err := p.QueryRow(bg, `select is_nullable from information_schema.columns
+		where table_name='invite_codes' and column_name='reward_for'`).Scan(&nullable)
+	if err != nil || nullable != "YES" {
+		t.Fatalf("nullable=%q err=%v", nullable, err)
+	}
+	err = p.QueryRow(bg, `select count(*) from pg_constraint k
+		where k.conrelid='invite_codes'::regclass and k.confrelid='invite_codes'::regclass and k.contype='f'`).Scan(&refs)
+	if err != nil || refs != 1 {
+		t.Fatalf("self-referencing fk count=%d err=%v", refs, err)
+	}
+	if err := db.MigrateDown(bg, dbtest.URL()); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := p.QueryRow(bg, `select count(*) from information_schema.columns
+		where table_name='invite_codes' and column_name='reward_for'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("column after down: n=%d err=%v", n, err)
+	}
+}

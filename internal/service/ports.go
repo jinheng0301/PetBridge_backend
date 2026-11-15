@@ -38,13 +38,66 @@ type RefreshTokenStore interface {
 type RoomStore interface {
 	CreateForOwner(ctx context.Context, ownerID string) (model.RoomInfo, error)
 	GetByOwner(ctx context.Context, ownerID string) (model.RoomInfo, error)
+	// LockRooms dedupes ids and locks them ORDER BY id FOR UPDATE; missing ids are absent from the map.
+	LockRooms(ctx context.Context, ids ...string) (map[string]model.RoomState, error)
+	// Admit bumps member_count when the room is open and below capacity.
+	Admit(ctx context.Context, roomID string) (memberCount int, ok bool, err error)
+	MarkFull(ctx context.Context, roomID string) error
+	// ListForMember returns the user's active rooms, own room first, members filled in.
+	ListForMember(ctx context.Context, userID string) ([]model.RoomDetail, error)
 }
 
 type RoomMemberStore interface {
 	AddOwner(ctx context.Context, roomID, userID string) error
+	IsActiveMember(ctx context.Context, roomID, userID string) (bool, error)
+	CountActiveForUser(ctx context.Context, userID string) (int, error)
+	AgeBands(ctx context.Context, roomID string) ([]string, error)
+	// AddMember takes the smallest free seat (1..5) with role 'member'.
+	AddMember(ctx context.Context, roomID, userID string) (seatNo int, err error)
+	ListMembers(ctx context.Context, roomID string) ([]model.MemberInfo, error)
 }
 
 type InviteCodeStore interface {
 	InsertSignup(ctx context.Context, code, roomID, userID string, expiresAt time.Time) (bool, error)
 	FirstSignupFor(ctx context.Context, userID string) (code string, expiresAt time.Time, err error)
+	// RoomIDOf reads the code's room without locking; an unknown code returns model.ErrNotFound.
+	RoomIDOf(ctx context.Context, code string) (roomID string, err error)
+	// LockUnusedForRoom locks the room's unused codes FOR UPDATE in code order.
+	LockUnusedForRoom(ctx context.Context, roomID string) error
+	// LockByCode selects FOR UPDATE; an unknown code returns model.ErrNotFound.
+	LockByCode(ctx context.Context, code string) (model.InviteCode, error)
+	MarkUsed(ctx context.Context, code, userID string, at time.Time) error
+	// VoidUnusedForRoom voids unused codes and returns the distinct non-empty issued_to of those codes.
+	VoidUnusedForRoom(ctx context.Context, roomID string) (holders []string, err error)
+	// CountUnusedValid counts status=unused with expires_at > now.
+	CountUnusedValid(ctx context.Context, roomID string, now time.Time) (int, error)
+	// LifetimeCount counts codes issued to the user excluding source 'zero'.
+	LifetimeCount(ctx context.Context, userID string) (int, error)
+	InsertReward(ctx context.Context, code, roomID, userID, forCode string, expiresAt time.Time) (inserted bool, err error)
+	RewardsFor(ctx context.Context, forCode string) ([]model.CodeInfo, error)
+	// ListForUser reports the effective status (unused and expired -> expired), newest first.
+	ListForUser(ctx context.Context, userID string, now time.Time) ([]model.CodeListItem, error)
+}
+
+type BanStore interface {
+	IsBanned(ctx context.Context, roomID, userID string) (bool, error)
+}
+
+// JoinGuard applies the join-by-code limits (design 5.3); ratelimit.JoinGuard implements it.
+type JoinGuard interface {
+	Cooldown(ctx context.Context, userID string) time.Duration
+	Allow(ctx context.Context, ip string) (bool, time.Duration)
+	RecordFailure(ctx context.Context, userID string)
+	RecordSuccess(ctx context.Context, userID string)
+}
+
+// Publisher delivers realtime events. Services call it only after commit.
+type Publisher interface {
+	Publish(ctx context.Context, e Event)
+}
+
+type RewardStore interface {
+	// Grant records the reward once per (user, room); inserted=false when already granted.
+	Grant(ctx context.Context, userID, roomID string, count int) (inserted bool, err error)
+	InsertEdge(ctx context.Context, inviterID, inviteeID, code string) error
 }

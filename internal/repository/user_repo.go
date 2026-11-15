@@ -43,8 +43,12 @@ func (r *UserRepo) State(ctx context.Context, userID string) (status string, onb
 }
 
 // LoadProfile returns the profile and the account status. lock adds
-// FOR UPDATE, which serialises concurrent onboarding of the same user. A
-// malformed id returns ErrNotFound (keeps the id index usable, avoids a cast error).
+// FOR NO KEY UPDATE, which serialises concurrent onboarding and joins of the
+// same user. It is not FOR UPDATE: that would also block the FOR KEY SHARE
+// lock taken by foreign-key checks on rows referencing this user (e.g.
+// invite_edges.inviter_id), so A joining B's room while B joins A's would
+// deadlock. A malformed id returns ErrNotFound (keeps the id index usable,
+// avoids a cast error).
 func (r *UserRepo) LoadProfile(ctx context.Context, userID string, lock bool) (model.Profile, string, error) {
 	if !uuidRE.MatchString(userID) {
 		return model.Profile{}, "", model.ErrNotFound
@@ -53,7 +57,7 @@ func (r *UserRepo) LoadProfile(ctx context.Context, userID string, lock bool) (m
 	var status string
 	sql := `select ` + profileCols + ` from users where id=$1`
 	if lock {
-		sql += ` for update`
+		sql += ` for no key update`
 	}
 	err := conn(ctx, r.pool).QueryRow(ctx, sql, userID).
 		Scan(&p.ID, &p.Nickname, &p.NativeLang, &p.MBTI, &p.PetType, &p.AgeBand, &p.TZ, &p.Onboarded, &status)
