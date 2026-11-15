@@ -134,13 +134,52 @@ func Load(getenv func(string) string) (*Config, error) {
 	return c, nil
 }
 
-// LoadFromProcess loads a local .env file (without overriding existing
-// variables) when APP_ENV is unset or local, then calls Load(os.Getenv).
-func LoadFromProcess() (*Config, error) {
+// DBConfig is the subset of configuration that database tooling needs, so
+// migrate does not demand REDIS_URL or JWT_SIGNING_KEY.
+type DBConfig struct {
+	AppEnv      string
+	DatabaseURL string
+}
+
+// LoadDB reads only APP_ENV and DATABASE_URL.
+func LoadDB(getenv func(string) string) (*DBConfig, error) {
+	var problems []string
+	c := &DBConfig{AppEnv: strings.TrimSpace(getenv("APP_ENV")), DatabaseURL: strings.TrimSpace(getenv("DATABASE_URL"))}
+	switch c.AppEnv {
+	case "local", "staging", "production":
+	case "":
+		problems = append(problems, "APP_ENV is required")
+	default:
+		problems = append(problems, "APP_ENV must be one of local|staging|production")
+	}
+	if c.DatabaseURL == "" {
+		problems = append(problems, "DATABASE_URL is required")
+	} else if c.AppEnv != "" && c.AppEnv != "local" && strings.Contains(strings.ToLower(c.DatabaseURL), "sslmode=disable") {
+		problems = append(problems, "DATABASE_URL must not use sslmode=disable unless APP_ENV=local")
+	}
+	if len(problems) > 0 {
+		return nil, &ValidationError{Problems: problems}
+	}
+	return c, nil
+}
+
+func loadDotenv() {
 	if env := os.Getenv("APP_ENV"); env == "" || env == "local" {
 		if _, err := os.Stat(".env"); err == nil {
 			_ = godotenv.Load(".env") // Load never overrides existing vars
 		}
 	}
+}
+
+// LoadDBFromProcess is LoadFromProcess for database tooling.
+func LoadDBFromProcess() (*DBConfig, error) {
+	loadDotenv()
+	return LoadDB(os.Getenv)
+}
+
+// LoadFromProcess loads a local .env file (without overriding existing
+// variables) when APP_ENV is unset or local, then calls Load(os.Getenv).
+func LoadFromProcess() (*Config, error) {
+	loadDotenv()
 	return Load(os.Getenv)
 }

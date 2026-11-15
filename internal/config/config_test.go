@@ -196,3 +196,23 @@ func TestLoad_CodeTTLDaysInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadDB_OnlyNeedsEnvAndDatabaseURL(t *testing.T) {
+	c, err := LoadDB(env(map[string]string{"APP_ENV": "local", "DATABASE_URL": "postgres://u:p@h/db?sslmode=disable"}))
+	if err != nil || c.AppEnv != "local" {
+		t.Fatalf("got %+v, %v", c, err)
+	}
+	for name, m := range map[string]map[string]string{
+		"APP_ENV":      {"DATABASE_URL": "postgres://u:p@h/db"},
+		"DATABASE_URL": {"APP_ENV": "local"},
+	} {
+		_, err := LoadDB(env(m))
+		if p := problems(t, err); !strings.Contains(p, name) {
+			t.Errorf("%s not reported: %s", name, p)
+		}
+	}
+	_, err = LoadDB(env(map[string]string{"APP_ENV": "staging", "DATABASE_URL": "postgres://u:p@h/db?sslmode=disable"}))
+	if p := problems(t, err); !strings.Contains(p, "sslmode") {
+		t.Errorf("sslmode=disable in staging not reported: %s", p)
+	}
+}

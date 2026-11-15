@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -15,9 +16,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: migrate up|down|status")
 		os.Exit(2)
 	}
-	cfg, err := config.LoadFromProcess()
+	cfg, err := config.LoadDBFromProcess()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		var ve *config.ValidationError
+		if errors.As(err, &ve) {
+			fmt.Fprintln(os.Stderr, "invalid configuration:")
+			for _, p := range ve.Problems {
+				fmt.Fprintln(os.Stderr, "  -", p)
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 	ctx := context.Background()
@@ -25,6 +34,11 @@ func main() {
 	case "up":
 		err = db.MigrateUp(ctx, cfg.DatabaseURL)
 	case "down":
+		// Migration 0001's Down drops every table, so never run it against a shared environment.
+		if cfg.AppEnv != "local" {
+			fmt.Fprintln(os.Stderr, "migrate: down is only allowed when APP_ENV=local")
+			os.Exit(1)
+		}
 		err = db.MigrateDown(ctx, cfg.DatabaseURL)
 	case "status":
 		var s string
