@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,5 +139,36 @@ func TestAuth_RejectsInactiveAndUnknownAccounts(t *testing.T) {
 		if w.Code != tc.code || errCode(t, w) != tc.err {
 			t.Errorf("%s: status %d code %q", name, w.Code, errCode(t, w))
 		}
+	}
+}
+
+type failingAccounts struct{}
+
+func (failingAccounts) AccountStatus(context.Context, string) (string, error) {
+	return "", errors.New("db exploded")
+}
+
+func TestAuth_AccountLookupFailureIs500AndLogged(t *testing.T) {
+	c := newClock()
+	iss := service.NewIssuer(testKey, 15*time.Minute, c.now)
+	var logs bytes.Buffer
+	r := gin.New()
+	r.Use(RequestID(), AccessLog(logger.New("debug", &logs)))
+	r.GET("/x", Auth(iss, failingAccounts{}), func(c *gin.Context) { c.Status(200) })
+
+	tok, _ := iss.Sign("u1")
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != 500 || errCode(t, w) != "INTERNAL" {
+		t.Fatalf("status %d code %q", w.Code, errCode(t, w))
+	}
+	if strings.Contains(w.Body.String(), "db exploded") {
+		t.Fatal("internal error leaked to the client")
+	}
+	if !strings.Contains(logs.String(), "db exploded") {
+		t.Fatalf("root cause missing from log: %s", logs.String())
 	}
 }

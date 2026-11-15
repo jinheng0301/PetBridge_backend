@@ -47,6 +47,7 @@ func Auth(p TokenParser, a AccountChecker) gin.HandlerFunc {
 			handler.Fail(c, http.StatusUnauthorized, model.CodeUnauthorized, "unauthorized")
 			return
 		case err != nil:
+			_ = c.Error(err) // logged by AccessLog; never echoed to the client
 			handler.Fail(c, http.StatusInternalServerError, model.CodeInternal, "internal error")
 			return
 		case status != "active":
