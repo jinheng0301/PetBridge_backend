@@ -19,7 +19,13 @@ func Run(ctx context.Context, addr string, handler http.Handler, l *slog.Logger)
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second, // slow request bodies must not hold a connection
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: it would also cut WebSocket connections (B4).
+	}
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()

@@ -19,6 +19,10 @@ type Module interface {
 // routes and every module's routes under /api/v1.
 func NewRouter(l *slog.Logger, h *handler.HealthHandler, mods ...Module) *gin.Engine {
 	r := gin.New()
+	// Trust no proxy: X-Forwarded-For is client-controlled, so ClientIP must be
+	// the socket peer or per-IP rate limits can be bypassed. Behind Caddy, set
+	// the proxy's address here at deploy time.
+	_ = r.SetTrustedProxies(nil)
 	r.Use(middleware.RequestID(), middleware.AccessLog(l), middleware.Recovery(l))
 	r.GET("/healthz", h.Healthz)
 	r.GET("/readyz", h.Readyz)
