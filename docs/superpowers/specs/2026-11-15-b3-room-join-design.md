@@ -63,11 +63,14 @@
 **事务内，加锁顺序 users → invite_codes → rooms → room_members**（与 TRD 一致），具体步骤：
 
 ```
-0. 锁 users(me) FOR UPDATE          串行化同一用户的并发入房
-1. 锁 invite_codes(code) FOR UPDATE
+0. 锁 users(me) FOR NO KEY UPDATE   串行化同一用户的并发入房（不能用 FOR UPDATE，原因见下方修正 3）
+1. 查出码所属房间（不加锁），锁住该房间**全部 unused 码**（按 code 排序 FOR UPDATE，防死锁，见下方修正 4），
+   再锁 invite_codes(code) FOR UPDATE
      · 不存在 / expires_at <= now / status 为 expired|void → CODE_INVALID
-     · status=used 且 used_by=me → 仅当我此刻仍是该码所属房间的在席成员，才算重放：回读并返回首次结果（不计失败）；
+     · status=used 且 used_by=me → 仅当我此刻仍是该码所属房间的在席成员，才算重放：回读并返回当前房间、座位与首次的奖励码
+       （不重复入房、不重复发奖励、不计失败，**也不清零失败计数**，见 5.3）；
        否则（我已退出、被移除或房间已解散）→ CODE_INVALID，计入失败。否则被移除者拿旧码重放会得到 200，暴露"被移除"
+       已过期的已用码重放同样是 CODE_INVALID（重放只为客户端数秒内的超时重试而设）
      · status=used 且 used_by≠me → CODE_INVALID
 2. 按 id 升序一次锁定两间房：码所属房间、我自己的小屋（SELECT ... WHERE id IN (...) ORDER BY id FOR UPDATE）
 3. 业务校验（此时已持有目标房间锁，读到的成员是稳定的）。多条同时成立时按下列顺序，第一条命中即返回：
@@ -83,15 +86,18 @@
      → 0 行：ROOM_FULL（不计入失败冷却；此时已持锁，status 只可能是 full 或满额）
 5. 取最小空位号，INSERT room_members(role='member')
 6. UPDATE invite_codes SET status='used', used_by, used_at
-7. INSERT invite_edges；INSERT reward_grants ON CONFLICT DO NOTHING
+7. INSERT invite_edges（zero 码没有持有人，邀请人记为该房房主）；INSERT reward_grants ON CONFLICT DO NOTHING
      · 本次真正插入才发奖励码，绑定到我自己的小屋（见 5.2）
 8. 若 member_count = capacity：rooms.status='full'；该房间所有 unused 码置 void
 9. COMMIT；提交后 Publish：member.joined（房内其余成员）、code.invalidated（被作废码的 issued_to 持有人）
 ```
 
-**对 TRD 7.2 的两处修正**（落地时同步改 TRD）：
+**对 TRD 7.2 的四处修正**（已同步 TRD）：
 1. **先锁房间，再做全部业务校验。** TRD 的步骤让校验读成员时不持有房间锁，而"是否在席""是否满员"在校验与第 4 步之间可能被并发的入房、移除、退出改变。先锁房间后，校验读到的是稳定状态。注：年龄隔离本身不存在并发缺口——房主永远在席且不能退出，房主的年龄段就决定了整间房的类别，成年房永远拒绝未成年人，反之亦然。
 2. **同时锁两间房并按 id 升序。** 奖励码要写入"我自己的小屋"，所以一次入房会涉及两间房。A 用码进 B 的房、B 同时用码进 A 的房，如果各自"先锁目标房再锁自己房"会互相等待而死锁。统一按 id 升序一次锁定，两边顺序一致。
+3. **用户行用 `FOR NO KEY UPDATE`，不用 `FOR UPDATE`**（并发测试发现）。第 7 步写 `invite_edges.inviter_id` 时，外键检查要给**对方**用户行加 KEY SHARE 锁；A 进 B 的房、B 同时进 A 的房时，双方各自用 `FOR UPDATE` 锁着自己的用户行，会互相等待而死锁。`FOR NO KEY UPDATE` 与自身仍然互斥（同一用户的并发入房、onboarding 照样被串行化），但不与 KEY SHARE 冲突。
+4. **先锁该房间全部 unused 码，再锁房间**（并发测试与评审发现）。房间被填满时，赢家要作废该房间所有 unused 码，其中包含另一个正在入房的人已经锁住的码。若各自只锁自己的码，则：甲持有 X1、乙持有 X2，甲锁房间并填满、去作废 X2（乙持有、乙在等房间锁），双方互相等待，死锁。统一为"房间内全部 unused 码按 code 排序锁定 → 房间"，B3b 的**解散必须同样先按此顺序锁码再改房间**，补码（只插入新码）不受影响。
+   - 已知的极小窗口：第 1 步锁定 unused 码集合之后、拿到房间锁之前，房主新增了奖励码，且另一人带着排序在前的新码恰好已持锁，仍可能成环。窗口为毫秒级，B3a 不处理；B3b 可对 `40P01`/`40001` 做一次有界重试（重试安全，已提交的入房重试会走重放分支）。
 
 **成功响应** 200：`{ room: {id, status, member_count, capacity}, seat_no, members: [{user_id, nickname, pet_type, seat_no, role}], rewards: [{code, expires_at}] }`。`rewards` 在没有奖励时为 `[]`，不返回 null。
 
@@ -113,7 +119,7 @@
 
 | 对象 | 规则 | 键 | 超限表现 |
 | :-- | :-- | :-- | :-- |
-| 输码失败 | 同用户 10 分钟内累计 5 次失败 → 冷却 30 分钟；成功入房清零 | 计数 `rl:join:u:{uid}`，冷却 `cd:join:u:{uid}` | `CODE_COOLDOWN` 429，`details.retry_after_seconds` |
+| 输码失败 | 同用户 10 分钟内累计 5 次失败 → 冷却 30 分钟；仅"真正成功入房"清零，重放不清零（否则已入房的用户可靠重放旧码无限重置计数，绕过冷却） | 计数 `rl:join:u:{uid}`，冷却 `cd:join:u:{uid}` | `CODE_COOLDOWN` 429，`details.retry_after_seconds` |
 | 输码频率 | 同 IP 每小时 30 次（所有尝试，含成功） | `rl:join:ip:{ip}` | `RATE_LIMITED` 429 + `Retry-After` |
 | 登录 | 同 IP 每分钟 10 次，作用于三个 `/auth/login/*` | `rl:login:ip:{ip}` | `RATE_LIMITED` 429 + `Retry-After` |
 
@@ -175,7 +181,7 @@
 - 再写入 `FULL2345`（zero、void、绑定 dev-full 的小屋，有效期 10 年），用于验证"满员后码失效返回 `CODE_INVALID`"
 - 不让 A–F 去占座：入房后他们会占掉第二个房间名额，联调"B 用 `DEVA2345` 加入 A"时会得到 `ROOM_LIMIT`
 - 重复运行：占座用户的码已 `used_by` 自己，走重放分支，结果不变
-- `scripts/smoke.ps1` 扩展：B 登录 → onboarding → 用 `DEVA2345` 入房 → `GET /rooms/mine`，断言 A 的小屋 `member_count=2` 且返回了奖励码
+- `scripts/smoke.ps1` 扩展：为保持种子夹具不被消耗，冒烟脚本新建两个临时用户，第二个用第一个的 signup 码入房 → `GET /rooms/mine`，断言 `member_count=2`、返回了奖励码、自己的小屋排第一且共 2 个房间（`DEVA2345` 留给人工联调）
 
 ### 5.11 代码结构
 
