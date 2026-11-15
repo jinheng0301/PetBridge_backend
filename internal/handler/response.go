@@ -5,7 +5,9 @@ package handler
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -41,6 +43,16 @@ func RequestIDFrom(c *gin.Context) string { return c.GetString(model.CtxRequestI
 
 // UserID returns the authenticated user's id (empty if the route is unprotected).
 func UserID(c *gin.Context) string { return c.GetString(model.CtxUserID) }
+
+// RetrySeconds turns a wait into whole seconds for Retry-After and
+// retry_after_seconds: rounded up, never below 1.
+func RetrySeconds(d time.Duration) int {
+	secs := int(math.Ceil(d.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	return secs
+}
 
 // MaxBodyBytes caps every JSON request body.
 const MaxBodyBytes = 64 << 10
