@@ -21,7 +21,7 @@ tasks:
       - go run ./cmd/tools/migrate up
 
   seed:
-    desc: Write local test data (6 users + zero code DEVA2345); APP_ENV=local only
+    desc: Write local test data (11 users + DEVA2345 + FULL2345); APP_ENV=local only
     cmds:
       - go run ./cmd/tools/seed
 

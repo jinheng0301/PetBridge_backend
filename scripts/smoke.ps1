@@ -1,5 +1,5 @@
 # Smoke test: /healthz must return 200 and /readyz must report status ok, then (when dev login is
-# enabled) login -> onboarding -> GET /me. Later batches add join room -> send message.
+# enabled) login -> onboarding -> GET /me. then (B3) a second user joins the first user's room.
 $ErrorActionPreference = 'Stop'
 
 # Port: APP_PORT from the environment, else from .env, else 8080.
@@ -48,3 +48,35 @@ try {
     Write-Host "FAIL auth flow: $($_.Exception.Message)"
     exit 1
 }
+
+# B3 flow: a second temp user joins the first user's room with its signup code.
+try {
+    $email2 = "smoke-$([guid]::NewGuid().ToString('N').Substring(0,8))@local"
+    $login2 = Invoke-RestMethod -Method Post -Uri "$base/auth/login/dev" -ContentType 'application/json' `
+        -Body (@{ email = $email2 } | ConvertTo-Json) -TimeoutSec 5
+    $headers2 = @{ Authorization = "Bearer $($login2.data.access_token)" }
+    $body2 = @{ native_lang = 'ko'; mbti = 'INFP'; nickname = 'Smoke2'; age_band = '18_plus'; tz = 'Asia/Seoul' } | ConvertTo-Json
+    Invoke-RestMethod -Method Post -Uri "$base/me/onboarding" -ContentType 'application/json' -Headers $headers2 -Body $body2 -TimeoutSec 5 | Out-Null
+
+    $joinBody = @{ code = $ob.data.invite_code.code } | ConvertTo-Json
+    $join = Invoke-RestMethod -Method Post -Uri "$base/rooms/join" -ContentType 'application/json' -Headers $headers2 -Body $joinBody -TimeoutSec 5
+    if ($join.data.room.member_count -ne 2) {
+        Write-Host "FAIL join: member_count is $($join.data.room.member_count), want 2"
+        exit 1
+    }
+    if (-not ($join.data.rewards.Count -gt 0)) {
+        Write-Host "FAIL join: no reward codes returned"
+        exit 1
+    }
+    $mine = Invoke-RestMethod -Method Get -Uri "$base/rooms/mine" -Headers $headers2 -TimeoutSec 5
+    $rooms = @($mine.data)
+    if ($rooms.Count -ne 2 -or $rooms[0].is_owner -ne $true) {
+        Write-Host "FAIL /rooms/mine unexpected: $($mine.data | ConvertTo-Json -Compress -Depth 5)"
+        exit 1
+    }
+    Write-Host "OK join -> rooms/mine ($email2, member_count=$($join.data.room.member_count), rewards=$(@($join.data.rewards).Count), rooms=$($rooms.Count))"
+} catch {
+    Write-Host "FAIL join flow: $($_.Exception.Message)"
+    exit 1
+}
+
