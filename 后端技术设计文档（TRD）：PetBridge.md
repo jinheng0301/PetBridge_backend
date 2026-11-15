@@ -466,7 +466,7 @@ petbridge/
 | rooms | id, owner\_id, capacity(默认5), member\_count, status(open/full/closed) | 每个用户注册时自动拥有一间“自己的小屋” |
 | room\_members | room\_id, user\_id, seat\_no, role, joined\_at, left\_at, left\_reason(left/kicked/dissolved) | 在席唯一约束见 6.2 |
 | room\_bans | room\_id, user\_id, banned\_by, created\_at | 被房主移除者的黑名单，主键 (room\_id, user\_id)；入房时命中则按 CODE\_INVALID 处理 |
-| invite\_codes | code, room\_id, issued\_to, source, status, used\_by, used\_at, expires\_at | source：zero / signup / join\_reward / owner\_regen；status：unused / used / expired / void |
+| invite\_codes | code, room\_id, issued\_to, source, status, used\_by, used\_at, expires\_at, reward\_for（B3 迁移 0003：奖励码由哪个码触发，可空） | source：zero / signup / join\_reward / owner\_regen；status：unused / used / expired / void |
 | reward\_grants | user\_id, room\_id, granted\_count, created\_at | 唯一键 (user\_id, room\_id)，保证奖励幂等 |
 | invite\_edges | inviter\_id, invitee\_id, code, created\_at | 裂变关系树，运营分析与风控用 |
 | messages | id(uuidv7), room\_id, sender\_id, scope(room/dm), to\_user\_id, kind(text/phrase/sticker), src\_lang, body, client\_msg\_id, mod\_status, created\_at | **MVP 不分区**（见下方说明）；主键 id，唯一键 (sender\_id, client\_msg\_id) 保证重发幂等；索引 (room\_id, id) 支撑游标分页 |
@@ -525,19 +525,28 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 0a. SELECT 1 FROM users WHERE id=$me FOR UPDATE
       （串行化同一用户的并发入房，否则两个并发请求会同时通过“最多 2 间房”的检查）
 1. SELECT * FROM invite_codes WHERE code=$1 FOR UPDATE
-      → 不存在/已用/已过期/已作废：回滚，返回 CODE_INVALID（对外不区分原因）
-1a. 业务校验（在事务内读取该房间现有成员）：
+      → 不存在/已过期/已作废：回滚，返回 CODE_INVALID（对外不区分原因）
+      → 已用且 used_by=自己，且自己此刻仍是该码所属房间的在席成员：视为重放（客户端超时重试），
+        返回首次入房的结果与奖励码，不再校验、不计失败
+      → 已用且不满足上一条（他人用过，或自己已退出/被移除）：CODE_INVALID
+1a. 按 id 升序一次锁定两间房：码所属房间、用户自己的小屋（SELECT ... WHERE id IN (...) ORDER BY id FOR UPDATE）。
+      奖励码要写进自己的小屋，所以一次入房涉及两间房；统一升序加锁才不会在“A 进 B 的房、B 进 A 的房”并发时互相等待
+1b. 业务校验（已持有房间锁，读到的成员稳定）。多条同时成立时按下列顺序，第一条命中即返回：
+      · 房间 status=closed → CODE_INVALID（防御性，当前不会产生）
       · 码所属房间的房主就是自己（用自己的码）→ CODE_INVALID
       · 命中 room_bans（曾被房主移除）→ CODE_INVALID（对外不暴露“被移除”的事实）
+      · 已是该房间在席成员 → ALREADY_MEMBER（不消耗码、不发奖励）
       · 用户当前在席房间数 ≥ 2 → ROOM_LIMIT
       · 未成年人双向隔离：用户与房间现有全部成员的“是否成年”必须一致，否则 AGE_RESTRICTED
+        （房主永远在席，其年龄段即决定整间房的类别）
 2. UPDATE rooms SET member_count = member_count + 1
       WHERE id=$room AND status='open' AND member_count < capacity RETURNING member_count
       → 0 行：返回 ROOM_FULL（不计入失败冷却）
-3. 取最小空位号，INSERT room_members；若违反唯一约束（已在房）→ 视为成功，返回现有房间（幂等）
+3. 取最小空位号，INSERT room_members（“已在房”已在 1b 判断，唯一索引仅作兜底）
 4. UPDATE invite_codes SET status='used', used_by, used_at
-5. INSERT invite_edges；INSERT reward_grants ON CONFLICT DO NOTHING
-      → 本次真正插入才生成奖励码，绑定到**用户自己的小屋**；数量 = min(app_config 配置值, 自己小屋空位数 − 现有未用有效码数)，下限 0，并受终身上限 20 约束（口径：除种子码外所有来源累计，见 PRD R6）
+5. INSERT invite_edges；INSERT reward_grants ON CONFLICT DO NOTHING（即使本次奖励数量为 0 也写入，granted_count=0，
+      否则用户可退出再加入同一房间，在腾出空位后刷奖励）
+      → 本次真正插入才生成奖励码（invite_codes.reward_for 记录触发它的码，供重放回读），绑定到**用户自己的小屋**；数量 = min(app_config 配置值, 自己小屋空位数 − 现有未用有效码数)，下限 0，并受终身上限 20 约束（口径：除种子码外所有来源累计，见 PRD R6）
 6. 若 member_count = capacity：rooms.status='full'；
       UPDATE invite_codes SET status='void' WHERE room_id=$room AND status='unused'
 7. COMMIT；提交后发布事件 member.joined、code.invalidated（对被作废码的持有者）
@@ -545,7 +554,9 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 
 **为什么不需要分布式锁**：竞争只发生在同一个房间的 5 个席位上，`UPDATE ... WHERE member_count < capacity` 是数据库级原子条件更新，多人同时抢最后一个席位时只有一个能得到 `RETURNING` 行。热点房间的锁竞争范围天然被 5 人上限限制住了。
 
-**统一加锁顺序（防死锁）**：凡是同时涉及多张表的事务（入房、踢人、解散、补码、退出），一律按 `users → invite_codes → rooms → room_members` 的顺序加锁，不得反向。入房事务是“码 → 房间”，所以解散房间时也必须先作废码、再改房间。
+**统一加锁顺序（防死锁）**：凡是同时涉及多张表的事务（入房、踢人、解散、补码、退出），一律按 `users → invite_codes → rooms → room_members` 的顺序加锁，不得反向。入房事务是“码 → 房间”，所以解散房间时也必须先作废码、再改房间。同一事务需要锁多间房时（入房：目标房 + 自己的小屋），按房间 id 升序一次锁定。
+
+**限流顺序与失败计数**：事务前依次为 ①用户冷却检查（命中即 CODE_COOLDOWN，不计入 IP 次数）→ ②IP 计数 +1，超限 RATE_LIMITED → ③onboarding 检查 → 事务。只有 CODE_INVALID（含格式错误的码）计入 10 分钟 5 次的失败；ROOM_FULL、ALREADY_MEMBER、ROOM_LIMIT、AGE_RESTRICTED 不计入，也不消耗码。Redis 不可用时改用进程内计数，IP 上限收紧为每小时 15 次。
 
 **测试要求**：集成测试里 100 个协程同时抢同一房间最后一个席位，断言恰好 1 人成功、member\_count 不超限、奖励只发 1 次；同一用户并发用两个不同的码加入两间不同的房间，断言最多只成功到“自己的 + 1 间”。
 
@@ -698,6 +709,10 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 | NOT\_ROOM\_OWNER | 非房主执行房主操作（v1.2 新增） | 隐藏入口，一般不会触发 |
 | OWNER\_CANNOT\_LEAVE | 房主尝试退出自己的小屋（v1.2 新增） | 引导使用“解散” |
 | CODE\_ISSUE\_LIMIT | 自助补码被拒，`details.reason` 区分原因（v1.2 新增） | 按 reason 展示文案 |
+| ONBOARDING\_REQUIRED | 未完成 onboarding 就调用入房等接口（7.1 约定） | 跳转 onboarding |
+| ROOM\_NOT\_FOUND | 房间不存在，或调用者与该房间无关（不泄露房间是否存在） | 刷新房间列表 |
+
+**HTTP 状态映射**：CODE\_INVALID 404；ROOM\_FULL、ALREADY\_MEMBER（`details.room_id`）、ROOM\_LIMIT、OWNER\_CANNOT\_LEAVE、CODE\_ISSUE\_LIMIT 409；AGE\_RESTRICTED、ONBOARDING\_REQUIRED、NOT\_ROOM\_OWNER 403；CODE\_COOLDOWN（`details.retry_after_seconds`）、RATE\_LIMITED（带 `Retry-After` 头）429；ROOM\_NOT\_FOUND 404。
 
 ---
 
@@ -1013,7 +1028,7 @@ volumes:
 
 - 6 个测试用户：A 日语 ENFP、B 韩语 INFP、C 繁中 INTJ、D 简中 ESTJ、E 英语 ISFP、F 未成年人（用于验证年龄规则）。邮箱形如 `dev-a@local`。
 - 零号种子验证码 `DEVA2345`，绑定 A 的小屋，用于测试入房。
-- 一间已满员的小屋及其已作废的验证码 `FULL2345`，用于验证 `CODE_INVALID`（满员后验证码自动作废）；`ROOM_FULL` 只会在并发抢最后一席时出现，由并发集成测试覆盖。
+- 一间已满员的小屋及其已作废的验证码 `FULL2345`，用于验证 `CODE_INVALID`（满员后验证码自动作废）。这间小屋属于专用用户 `dev-full@local`，由 `dev-fill1..4@local` 通过真实入房流程占满，**不使用 A–F**：入房后他们会占掉第二个房间名额，之后用 `DEVA2345` 联调会得到 `ROOM_LIMIT`；`ROOM_FULL` 只会在并发抢最后一席时出现，由并发集成测试覆盖。
 
 **手动验证流程（人工冒烟）**
 
@@ -1058,10 +1073,10 @@ volumes:
 | :-- | :-- | :-- |
 | B1 | 仓库骨架、CI、OpenAPI 初稿、数据库迁移、配置与日志 | 能部署的空服务 |
 | B2 | 登录（Apple/Google）、token、onboarding、宠物映射 | 前端可注册 |
-| B3 | 验证码生成、入房事务、奖励发放、限流冷却、房主踢人/自助补码/退出（7.8）、并发测试 | **核心机制跑通** |
+| B3 | 验证码生成、入房事务、奖励发放、限流冷却（含登录限流）、房主踢人/解散/自助补码/退出（7.8）、并发测试；分 B3a（入房主路径）与 B3b（房主管理）两段交付 | **核心机制跑通** |
 | B4 | WS Hub、presence、事件分发、断线重放 | 小屋实时同步 |
 | B5 | 消息收发、短语模板、AI 网关（缓存/熔断/降级/配额） | 跨语言消息可用 |
-| B6 | 内容审核、举报屏蔽、未成年人规则、房主解散、打卡与装扮 | 合规与养成 |
+| B6 | 内容审核、举报屏蔽、未成年人规则、打卡与装扮（房主解散已提前到 B3） | 合规与养成 |
 | B7 | 推送、Widget 快照、分享卡片数据、账号删除 | 功能补齐 |
 | B8 | 压测、故障演练、监控告警、备份恢复演练、灰度准备 | 可灰度上线 |
 
