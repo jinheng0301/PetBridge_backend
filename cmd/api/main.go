@@ -17,6 +17,7 @@ import (
 	"github.com/jinheng0301/petbridge/internal/middleware"
 	"github.com/jinheng0301/petbridge/internal/platform/db"
 	"github.com/jinheng0301/petbridge/internal/platform/logger"
+	"github.com/jinheng0301/petbridge/internal/platform/ratelimit"
 	pbredis "github.com/jinheng0301/petbridge/internal/platform/redis"
 	"github.com/jinheng0301/petbridge/internal/repository"
 	"github.com/jinheng0301/petbridge/internal/server"
@@ -71,15 +72,32 @@ func main() {
 	// repository -> service -> handler
 	tx := repository.NewTxManager(pool)
 	users := repository.NewUserRepo(pool)
+	rooms := repository.NewRoomRepo(pool)
+	members := repository.NewRoomMemberRepo(pool)
+	codes := repository.NewInviteCodeRepo(pool)
 	issuer := service.NewIssuer(cfg.JWTSigningKey, cfg.AccessTokenTTL, time.Now)
 	authSvc := service.NewAuthService(users, repository.NewAuthIdentityRepo(pool),
 		repository.NewRefreshTokenRepo(pool), tx, issuer, cfg.RefreshTokenTTL)
-	userSvc := service.NewUserService(users, repository.NewRoomRepo(pool), repository.NewRoomMemberRepo(pool),
-		repository.NewInviteCodeRepo(pool), tx, cfg.CodeTTLDays, time.Now)
+	userSvc := service.NewUserService(users, rooms, members, codes, tx, cfg.CodeTTLDays, time.Now)
 
-	authHandler := handler.NewAuthHandler(authSvc, cfg.DevLoginEnabled, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{})
-	userHandler := handler.NewUserHandler(userSvc, middleware.Auth(issuer, userSvc))
-	router := server.NewRouter(log, health, authHandler, userHandler)
+	// Rate limits live in Redis and fall back to in-process counters while it is down.
+	counter := ratelimit.NewFallback(ratelimit.NewRedis(rdb), ratelimit.NewMemory(time.Now),
+		newFallbackLogger(log, 30*time.Second, time.Now))
+	joinSvc := service.NewJoinService(users, rooms, members, codes, repository.NewBanRepo(pool),
+		repository.NewRewardRepo(pool), tx, ratelimit.NewJoinGuard(counter), service.NopPublisher{},
+		service.JoinConfig{
+			CodeTTLDays:       cfg.CodeTTLDays,
+			RewardCount:       cfg.RewardCodeCount,
+			RewardLifetimeCap: cfg.RewardCodeLifetimeCap,
+		}, time.Now)
+
+	authn := middleware.Auth(issuer, userSvc)
+	authHandler := handler.NewAuthHandler(authSvc, cfg.DevLoginEnabled, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
+		WithLoginLimit(middleware.RateLimitIP(counter, "login", 10, time.Minute))
+	userHandler := handler.NewUserHandler(userSvc, authn)
+	roomHandler := handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn)
+	codeHandler := handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn)
+	router := server.NewRouter(log, health, authHandler, userHandler, roomHandler, codeHandler)
 
 	log.Info("starting api", "app_env", cfg.AppEnv, "port", cfg.AppPort)
 	if err := server.Run(ctx, net.JoinHostPort(cfg.AppHost, strconv.Itoa(cfg.AppPort)), router, log); err != nil {

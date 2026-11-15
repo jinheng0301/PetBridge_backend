@@ -23,22 +23,38 @@ type AuthHandler struct {
 	svc         *service.AuthService
 	devLogin    bool
 	apple, goog idtoken.Verifier
+	loginLimit  gin.HandlerFunc // optional; runs before the three login routes only
 }
 
 func NewAuthHandler(svc *service.AuthService, devLogin bool, apple, google idtoken.Verifier) *AuthHandler {
 	return &AuthHandler{svc: svc, devLogin: devLogin, apple: apple, goog: google}
 }
 
+// WithLoginLimit puts mw in front of the /auth/login/* routes (not refresh or
+// logout) and returns h. Call it before Routes.
+func (h *AuthHandler) WithLoginLimit(mw gin.HandlerFunc) *AuthHandler {
+	h.loginLimit = mw
+	return h
+}
+
 // Routes implements server.Module. The dev route only exists when enabled.
 func (h *AuthHandler) Routes(v1 *gin.RouterGroup) {
 	g := v1.Group("/auth")
 	if h.devLogin {
-		g.POST("/login/dev", h.loginDev)
+		h.login(g, "/login/dev", h.loginDev)
 	}
-	g.POST("/login/apple", h.loginWith("apple", h.apple))
-	g.POST("/login/google", h.loginWith("google", h.goog))
+	h.login(g, "/login/apple", h.loginWith("apple", h.apple))
+	h.login(g, "/login/google", h.loginWith("google", h.goog))
 	g.POST("/refresh", h.refresh)
 	g.POST("/logout", h.logout)
+}
+
+func (h *AuthHandler) login(g *gin.RouterGroup, path string, fn gin.HandlerFunc) {
+	if h.loginLimit != nil {
+		g.POST(path, h.loginLimit, fn)
+		return
+	}
+	g.POST(path, fn)
 }
 
 func deviceID(c *gin.Context) string {

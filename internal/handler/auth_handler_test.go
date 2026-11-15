@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -216,6 +217,47 @@ func TestBody_Oversized_And_NotJSON(t *testing.T) {
 		w := e.do("POST", devPath, body)
 		if w.Code != 400 || errCode(t, w) != "VALIDATION_FAILED" {
 			t.Errorf("%s: status %d code %q", name, w.Code, errCode(t, w))
+		}
+	}
+}
+
+func TestLogin_RateLimited(t *testing.T) {
+	a := newApp(t, nil)
+	var refresh string
+	for i := 0; i < 10; i++ {
+		w := call(a.r, "POST", devPath, `{"email":"a@local"}`, "")
+		if w.Code != 200 {
+			t.Fatalf("login %d: %d %s", i, w.Code, w.Body.String())
+		}
+		refresh = data(t, w)["refresh_token"].(string)
+	}
+	for _, p := range []string{devPath, "/api/v1/auth/login/apple", "/api/v1/auth/login/google"} {
+		w := call(a.r, "POST", p, `{"email":"a@local","id_token":"x"}`, "")
+		if w.Code != 429 || errCode(t, w) != "RATE_LIMITED" {
+			t.Fatalf("%s: %d %s", p, w.Code, w.Body.String())
+		}
+		if secs, err := strconv.Atoi(w.Header().Get("Retry-After")); err != nil || secs < 1 || secs > 60 {
+			t.Fatalf("%s Retry-After = %q", p, w.Header().Get("Retry-After"))
+		}
+	}
+	// refresh and logout are not limited.
+	for i := 0; i < 3; i++ {
+		w := call(a.r, "POST", "/api/v1/auth/refresh", `{"refresh_token":"`+refresh+`"}`, "")
+		if w.Code != 200 {
+			t.Fatalf("refresh %d: %d %s", i, w.Code, w.Body.String())
+		}
+		refresh = data(t, w)["refresh_token"].(string)
+	}
+	if w := call(a.r, "POST", "/api/v1/auth/logout", `{"refresh_token":"`+refresh+`"}`, ""); w.Code != 204 {
+		t.Fatalf("logout: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestLogin_NoLimitWithoutWithLoginLimit(t *testing.T) {
+	e := newEnv(t, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{})
+	for i := 0; i < 12; i++ {
+		if w := e.do("POST", devPath, `{"email":"a@local"}`); w.Code != 200 {
+			t.Fatalf("login %d: %d", i, w.Code)
 		}
 	}
 }

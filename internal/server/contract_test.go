@@ -12,6 +12,7 @@ import (
 	"github.com/jinheng0301/petbridge/internal/handler"
 	"github.com/jinheng0301/petbridge/internal/middleware"
 	"github.com/jinheng0301/petbridge/internal/platform/logger"
+	"github.com/jinheng0301/petbridge/internal/platform/ratelimit"
 	"github.com/jinheng0301/petbridge/internal/service"
 	"github.com/jinheng0301/petbridge/pkg/idtoken"
 )
@@ -39,9 +40,14 @@ func TestOpenAPI_RoutesMatchDocument(t *testing.T) {
 	probe := func(context.Context) error { return nil }
 	// Handlers are never invoked here, so nil services are fine.
 	iss := service.NewIssuer("k", time.Minute, time.Now)
+	authn := middleware.Auth(iss, allowAll{})
+	limit := middleware.RateLimitIP(ratelimit.NewMemory(time.Now), "login", 10, time.Minute)
 	r := NewRouter(logger.New("error", &strings.Builder{}), handler.NewHealthHandler(probe, probe),
-		handler.NewAuthHandler(nil, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}),
-		handler.NewUserHandler(nil, middleware.Auth(iss, allowAll{})))
+		handler.NewAuthHandler(nil, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
+			WithLoginLimit(limit),
+		handler.NewUserHandler(nil, authn),
+		handler.NewRoomHandler(nil, nil, authn),
+		handler.NewCodeHandler(nil, authn))
 
 	routes := map[string]bool{}
 	for _, ri := range r.Routes() {

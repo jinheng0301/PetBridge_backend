@@ -1,12 +1,14 @@
 openapi: 3.0.3
 info:
   title: PetBridge API
-  version: 0.2.0
+  version: 0.3.0
   description: >
-    B2: health probes, authentication (dev login, Apple/Google stubs, refresh, logout)
-    and onboarding. Rooms, invite codes and messages arrive from B3 onward.
+    B3a: health probes, authentication (dev login, Apple/Google stubs, refresh, logout),
+    onboarding, joining a room by invite code, listing my codes and my rooms.
+    Room management (remove, dissolve, leave, regenerate codes) arrives in B3b; messages from B4 onward.
     Every business path lives under /api/v1; probes do not.
     Success bodies are {"data": ...}; failures are {"error": {code, message, request_id, details?}}.
+    Login routes are limited to 10 requests per minute per client IP (429 RATE_LIMITED with Retry-After).
 paths:
   /healthz:
     get:
@@ -71,6 +73,7 @@ paths:
         '200': { $ref: '#/components/responses/LoginOK' }
         '400': { $ref: '#/components/responses/ValidationFailed' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
         '500': { $ref: '#/components/responses/Internal' }
   /api/v1/auth/login/apple:
     post:
@@ -87,6 +90,7 @@ paths:
         '400': { $ref: '#/components/responses/ValidationFailed' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
         '501': { $ref: '#/components/responses/ProviderNotConfigured' }
   /api/v1/auth/login/google:
     post:
@@ -103,6 +107,7 @@ paths:
         '400': { $ref: '#/components/responses/ValidationFailed' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
         '501': { $ref: '#/components/responses/ProviderNotConfigured' }
   /api/v1/auth/refresh:
     post:
@@ -191,6 +196,92 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
         '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/rooms/join:
+    post:
+      tags: [rooms]
+      summary: Join a room with an invite code
+      description: >
+        The code is normalised (whitespace and '-' removed, upper-cased), so "abcd-2345" works.
+        A missing, null or non-string `code` is 400 VALIDATION_FAILED and does not count as a failure;
+        any string that is not a usable code (malformed, unknown, expired, used, own room, banned) is
+        404 CODE_INVALID and counts towards the cooldown: 5 within 10 minutes start a 30-minute
+        CODE_COOLDOWN. A successful join resets the count. A repeat of an already-successful join by a
+        user who is still seated in that room returns 200 with the current room, members and seat and
+        the original reward codes (no second reward, no second seat); it neither counts as a failure
+        nor resets the count. A used code that has since expired, or a user who is no longer seated,
+        gets CODE_INVALID.
+        Each client IP may make 30 attempts per hour (429 RATE_LIMITED with Retry-After).
+        ROOM_FULL, ALREADY_MEMBER, ROOM_LIMIT and AGE_RESTRICTED do not consume the code.
+        On success the caller may receive reward codes for their own room; `rewards` is [] when none.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JoinRequest' }
+      responses:
+        '200':
+          description: Joined (also returned when repeating a successful join)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/JoinResult' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/CodeInvalid' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/rooms/mine:
+    get:
+      tags: [rooms]
+      summary: Rooms I am in
+      description: >
+        Every room the caller is an active member of, own room first. Members who left are not listed.
+        [] before onboarding.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: My rooms
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/RoomDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/codes:
+    get:
+      tags: [codes]
+      summary: My invite codes
+      description: >
+        Every code issued to the caller, newest first, not paginated. `status` is the effective
+        status: an unused code past expires_at is reported as expired. [] before onboarding.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: My codes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/CodeListItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/Internal' }
 components:
   securitySchemes:
     bearerAuth:
@@ -232,6 +323,38 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: >
+        ACCOUNT_DISABLED (banned or deleted), ONBOARDING_REQUIRED (finish onboarding first) or
+        AGE_RESTRICTED (adults and minors never share a room).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    CodeInvalid:
+      description: >
+        CODE_INVALID. The code cannot be used; the reason is deliberately not given.
+        Counts towards the cooldown.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: >
+        ROOM_FULL, ROOM_LIMIT (already in 2 rooms, own room included) or ALREADY_MEMBER
+        (error.details.room_id names the room). The code is not consumed.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: >
+        RATE_LIMITED (too many requests from this IP; wait for the Retry-After header) or
+        CODE_COOLDOWN (too many wrong codes; wait error.details.retry_after_seconds, no header).
+      headers:
+        Retry-After:
+          description: Seconds until the limit lifts (RATE_LIMITED only).
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
   schemas:
     Error:
       type: object
@@ -246,16 +369,22 @@ components:
               example: NOT_READY
               description: >
                 One of NOT_READY, INTERNAL, UNAUTHORIZED, VALIDATION_FAILED, ACCOUNT_DISABLED,
-                REFRESH_INVALID, REFRESH_REUSED, PROVIDER_NOT_CONFIGURED.
+                REFRESH_INVALID, REFRESH_REUSED, PROVIDER_NOT_CONFIGURED, ONBOARDING_REQUIRED,
+                CODE_INVALID, ROOM_FULL, ALREADY_MEMBER, ROOM_LIMIT, AGE_RESTRICTED, CODE_COOLDOWN,
+                RATE_LIMITED.
             message: { type: string, description: 'For debugging only; localise by code.' }
             request_id: { type: string }
             details:
               type: object
-              description: Present on VALIDATION_FAILED from onboarding.
+              description: >
+                fields on VALIDATION_FAILED from onboarding; room_id on ALREADY_MEMBER;
+                retry_after_seconds on CODE_COOLDOWN.
               properties:
                 fields:
                   type: array
                   items: { type: string }
+                room_id: { type: string, format: uuid }
+                retry_after_seconds: { type: integer, minimum: 1 }
     IDTokenRequest:
       type: object
       required: [id_token]
@@ -343,3 +472,74 @@ components:
           properties:
             code: { type: string, description: '8 characters, no hyphen; format as XXXX-XXXX for display.', example: 98NX5RW3 }
             expires_at: { type: string, format: date-time }
+    JoinRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, description: 'As typed; case, spaces and hyphens are ignored.', example: DEVA-2345 }
+    RoomSummary:
+      type: object
+      required: [id, status, member_count, capacity]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [open, full, closed] }
+        member_count: { type: integer }
+        capacity: { type: integer }
+    MemberInfo:
+      type: object
+      required: [user_id, nickname, pet_type, seat_no, role]
+      properties:
+        user_id: { type: string, format: uuid }
+        nickname: { type: string, nullable: true }
+        pet_type: { type: string, nullable: true, example: happy_shiba }
+        seat_no: { type: integer, minimum: 1 }
+        role: { type: string, enum: [owner, member] }
+    CodeInfo:
+      type: object
+      required: [code, expires_at]
+      properties:
+        code: { type: string, description: '8 characters, no hyphen.', example: 98NX5RW3 }
+        expires_at: { type: string, format: date-time }
+    JoinResult:
+      type: object
+      required: [room, seat_no, members, rewards]
+      properties:
+        room: { $ref: '#/components/schemas/RoomSummary' }
+        seat_no: { type: integer, minimum: 1, description: "The caller's seat." }
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/MemberInfo' }
+        rewards:
+          type: array
+          description: Reward codes for the caller's own room; [] when none (never null).
+          items: { $ref: '#/components/schemas/CodeInfo' }
+    RoomDetail:
+      type: object
+      required: [id, is_owner, status, member_count, capacity, members]
+      properties:
+        id: { type: string, format: uuid }
+        is_owner: { type: boolean }
+        status: { type: string, enum: [open, full, closed] }
+        member_count: { type: integer }
+        capacity: { type: integer }
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/MemberInfo' }
+    CodeListItem:
+      type: object
+      required: [code, source, status, expires_at, room]
+      properties:
+        code: { type: string, example: 98NX5RW3 }
+        source: { type: string, enum: [signup, join_reward, owner_regen] }
+        status:
+          type: string
+          enum: [unused, used, expired, void]
+          description: Effective status; an unused code past expires_at is expired.
+        expires_at: { type: string, format: date-time }
+        room:
+          type: object
+          required: [id, member_count, capacity]
+          properties:
+            id: { type: string, format: uuid }
+            member_count: { type: integer }
+            capacity: { type: integer }

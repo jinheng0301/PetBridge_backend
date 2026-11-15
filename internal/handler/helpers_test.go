@@ -3,6 +3,8 @@ package handler_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,11 +14,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/jinheng0301/petbridge/internal/handler"
 	"github.com/jinheng0301/petbridge/internal/middleware"
 	"github.com/jinheng0301/petbridge/internal/platform/db/dbtest"
 	"github.com/jinheng0301/petbridge/internal/platform/logger"
+	"github.com/jinheng0301/petbridge/internal/platform/ratelimit"
 	"github.com/jinheng0301/petbridge/internal/repository"
+	"github.com/jinheng0301/petbridge/internal/server"
 	"github.com/jinheng0301/petbridge/internal/service"
+	"github.com/jinheng0301/petbridge/pkg/idtoken"
 )
 
 // The handler tests live in an external test package because they need the
@@ -62,6 +68,101 @@ func newEngine(buf *bytes.Buffer, h gin.HandlerFunc) *gin.Engine {
 	r.Any("/x", h)
 	return r
 }
+
+// app is the full router as main.go assembles it (auth with the login limit,
+// /me, /rooms, /codes) on a clean database.
+type app struct {
+	r    *gin.Engine
+	pool *pgxpool.Pool
+	logs *bytes.Buffer
+}
+
+// newApp builds the full router. counter backs both the join guard and the
+// login limit; nil means a fresh in-process counter.
+func newApp(t *testing.T, counter ratelimit.Counter) *app {
+	t.Helper()
+	authSvc, userSvc, iss, pool := newServices(t)
+	if counter == nil {
+		counter = ratelimit.NewMemory(time.Now)
+	}
+	users := repository.NewUserRepo(pool)
+	rooms := repository.NewRoomRepo(pool)
+	codes := repository.NewInviteCodeRepo(pool)
+	joinSvc := service.NewJoinService(users, rooms, repository.NewRoomMemberRepo(pool), codes,
+		repository.NewBanRepo(pool), repository.NewRewardRepo(pool), repository.NewTxManager(pool),
+		ratelimit.NewJoinGuard(counter), service.NopPublisher{},
+		service.JoinConfig{CodeTTLDays: 7, RewardCount: 3, RewardLifetimeCap: 20}, time.Now)
+	authn := middleware.Auth(iss, userSvc)
+	logs := &bytes.Buffer{}
+	r := server.NewRouter(logger.New("debug", logs), handler.NewHealthHandler(okProbe, okProbe),
+		handler.NewAuthHandler(authSvc, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
+			WithLoginLimit(middleware.RateLimitIP(counter, "login", 10, time.Minute)),
+		handler.NewUserHandler(userSvc, authn),
+		handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn),
+		handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn))
+	return &app{r: r, pool: pool, logs: logs}
+}
+
+func (a *app) exec(t *testing.T, q string, args ...any) {
+	t.Helper()
+	if _, err := a.pool.Exec(bg, q, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// member is a logged-in user, onboarded unless created with bare.
+type member struct {
+	token, id, roomID, code string
+}
+
+// bare logs in without onboarding.
+func (a *app) bare(t *testing.T, email string) member {
+	t.Helper()
+	tok, id := devLogin(t, a.r, email)
+	return member{token: tok, id: id}
+}
+
+// onboarded logs in and onboards with ageBand; code is the signup code.
+func (a *app) onboarded(t *testing.T, email, ageBand string) member {
+	t.Helper()
+	m := a.bare(t, email)
+	body := strings.Replace(onboardBody, "18_plus", ageBand, 1)
+	w := call(a.r, "POST", "/api/v1/me/onboarding", body, m.token)
+	if w.Code != 200 {
+		t.Fatalf("onboarding %s: %d %s", email, w.Code, w.Body.String())
+	}
+	d := asMap(t, w)["data"].(map[string]any)
+	m.roomID = d["room"].(map[string]any)["id"].(string)
+	m.code = d["invite_code"].(map[string]any)["code"].(string)
+	return m
+}
+
+// extraCode stores another unused owner_regen code (fixed value) for m's room.
+func (a *app) extraCode(t *testing.T, m member, code string) string {
+	t.Helper()
+	a.exec(t, `insert into invite_codes(code, room_id, issued_to, source, expires_at)
+		values($1,$2,$3,'owner_regen', now() + interval '1 day')`, code, m.roomID, m.id)
+	return code
+}
+
+func (a *app) join(m member, code string) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(map[string]string{"code": code})
+	return call(a.r, "POST", "/api/v1/rooms/join", string(b), m.token)
+}
+
+// failingCounter is a Counter whose backend is always down.
+type failingCounter struct{}
+
+var errRedisDown = errors.New("redis down")
+
+func (failingCounter) Incr(context.Context, string, time.Duration) (ratelimit.Hit, error) {
+	return ratelimit.Hit{}, errRedisDown
+}
+func (failingCounter) SetFlag(context.Context, string, time.Duration) error { return errRedisDown }
+func (failingCounter) FlagTTL(context.Context, string) (time.Duration, error) {
+	return 0, errRedisDown
+}
+func (failingCounter) Delete(context.Context, string) error { return errRedisDown }
 
 func do(r http.Handler, method, target, body string, hdr map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
