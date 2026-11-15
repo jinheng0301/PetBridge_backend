@@ -135,7 +135,7 @@ func (s *UserService) loadProfile(ctx context.Context, userID string, lock bool)
 // AccountStatus returns users.status for the auth middleware, so a banned or
 // deleted account is rejected even while its access token is still valid.
 func (s *UserService) AccountStatus(ctx context.Context, userID string) (string, error) {
-	_, status, err := s.users.LoadProfile(ctx, userID, false)
+	status, _, err := s.users.State(ctx, userID)
 	return status, err
 }
 
@@ -194,7 +194,12 @@ func (s *UserService) Onboard(ctx context.Context, userID string, in model.Onboa
 	}
 	if created {
 		// Re-read after commit so the response carries what was actually stored.
-		res.User, _ = s.loadProfile(ctx, userID, false)
+		// The data is already committed; if the reload fails, report the error
+		// so the client retries and gets the idempotent existing result,
+		// instead of a 200 carrying an empty user.
+		if res.User, err = s.loadProfile(ctx, userID, false); err != nil {
+			return model.OnboardingResult{}, err
+		}
 	}
 	return res, nil
 }

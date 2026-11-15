@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -279,5 +280,55 @@ func TestMe_BeforeAndAfterOnboarding(t *testing.T) {
 	}
 	if _, err := svc.Me(bg, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("unknown: %v", err)
+	}
+}
+
+func TestAccountStatus(t *testing.T) {
+	svc, pool, _ := setupUser(t)
+	uid := newUser(t, pool)
+	if st, err := svc.AccountStatus(bg, uid); err != nil || st != "active" {
+		t.Fatalf("active: %q, %v", st, err)
+	}
+	pool.Exec(bg, `update users set status='banned' where id=$1`, uid)
+	if st, err := svc.AccountStatus(bg, uid); err != nil || st != "banned" {
+		t.Fatalf("banned: %q, %v", st, err)
+	}
+	// Unknown and malformed ids are ErrNotFound (401), never a cast error (500).
+	for _, id := range []string{"00000000-0000-0000-0000-000000000000", "not-a-uuid", ""} {
+		if _, err := svc.AccountStatus(bg, id); !errors.Is(err, model.ErrNotFound) {
+			t.Errorf("id %q: %v", id, err)
+		}
+	}
+}
+
+// failingReload makes the post-commit profile reload fail while leaving the
+// in-transaction (locking) read alone.
+type failingReload struct{ UserStore }
+
+func (f failingReload) LoadProfile(ctx context.Context, id string, lock bool) (model.Profile, string, error) {
+	if !lock {
+		return model.Profile{}, "", errors.New("transient")
+	}
+	return f.UserStore.LoadProfile(ctx, id, lock)
+}
+
+func TestOnboard_ReloadFailureIsReportedAndRetrySucceeds(t *testing.T) {
+	svc, pool, _ := setupUser(t)
+	uid := newUser(t, pool)
+	good := svc.users
+	svc.users = failingReload{good}
+	if res, err := svc.Onboard(bg, uid, valid()); err == nil || res.User.ID != "" {
+		t.Fatalf("want error and empty result, got %+v, %v", res, err)
+	}
+	if count(t, pool, `select count(*) from rooms`) != 1 {
+		t.Fatal("onboarding must have been committed")
+	}
+	svc.users = good // the client's retry takes the idempotent path
+	res, err := svc.Onboard(bg, uid, valid())
+	if err != nil || !res.User.Onboarded || res.User.ID != uid {
+		t.Fatalf("retry: %+v, %v", res, err)
+	}
+	if count(t, pool, `select count(*) from rooms`) != 1 {
+		t.Fatal("retry must not create a second room")
 	}
 }

@@ -28,7 +28,7 @@ type AccountChecker interface {
 // same 401 so callers learn nothing about why. On success the user id is
 // stored under model.CtxUserID (read it with handler.UserID). The account must
 // also be active: access tokens outlive a ban by up to their TTL, so the status
-// is checked on every request (one indexed primary-key lookup).
+// is checked on every request (a status-only primary-key lookup).
 func Auth(p TokenParser, a AccountChecker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		parts := strings.Fields(c.GetHeader("Authorization"))

@@ -28,9 +28,17 @@ func (r *UserRepo) CreateEmpty(ctx context.Context) (string, error) {
 	return id, err
 }
 
-// State returns the account status and whether onboarding is complete.
+// State returns the account status and whether onboarding is complete. It is
+// the cheap lookup the auth middleware runs on every request. A malformed or
+// unknown id returns ErrNotFound (no cast error, no 500).
 func (r *UserRepo) State(ctx context.Context, userID string) (status string, onboarded bool, err error) {
+	if !uuidRE.MatchString(userID) {
+		return "", false, model.ErrNotFound
+	}
 	err = conn(ctx, r.pool).QueryRow(ctx, `select status, onboarded_at is not null from users where id=$1`, userID).Scan(&status, &onboarded)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, model.ErrNotFound
+	}
 	return
 }
 
