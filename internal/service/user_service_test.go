@@ -44,6 +44,8 @@ func TestValidate(t *testing.T) {
 		{"nick 21 han", mut(func(i *model.OnboardingInput) { i.Nickname = strings.Repeat("宠", 21) }), []string{"nickname"}},
 		{"nick 20 emoji", mut(func(i *model.OnboardingInput) { i.Nickname = strings.Repeat("🐶", 20) }), nil},
 		{"nick control char", mut(func(i *model.OnboardingInput) { i.Nickname = "a\nb" }), []string{"nickname"}},
+		{"nick bidi override", mut(func(i *model.OnboardingInput) { i.Nickname = "ab‮cd" }), []string{"nickname"}},
+		{"nick zero width", mut(func(i *model.OnboardingInput) { i.Nickname = "a​b" }), []string{"nickname"}},
 		{"many", model.OnboardingInput{}, []string{"native_lang", "mbti", "nickname", "age_band", "tz"}},
 		{"tz Tokyo works without OS zoneinfo", mut(func(i *model.OnboardingInput) { i.TZ = "Asia/Tokyo" }), nil},
 	}

@@ -48,7 +48,9 @@ func validNickname(n string) bool {
 		return false
 	}
 	for _, r := range n {
-		if unicode.IsControl(r) {
+		// Cf covers bidi overrides and zero-width characters, which can be
+		// used to impersonate other users in chat.
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return false
 		}
 	}
