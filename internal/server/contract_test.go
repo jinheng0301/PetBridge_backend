@@ -41,7 +41,7 @@ func TestOpenAPI_RoutesMatchDocument(t *testing.T) {
 	iss := service.NewIssuer("k", time.Minute, time.Now)
 	r := NewRouter(logger.New("error", &strings.Builder{}), handler.NewHealthHandler(probe, probe),
 		handler.NewAuthHandler(nil, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}),
-		handler.NewUserHandler(nil, middleware.Auth(iss)))
+		handler.NewUserHandler(nil, middleware.Auth(iss, allowAll{})))
 
 	routes := map[string]bool{}
 	for _, ri := range r.Routes() {
@@ -91,3 +91,7 @@ func TestOpenAPI_EveryOperationDeclaresErrorEnvelope(t *testing.T) {
 		}
 	}
 }
+
+type allowAll struct{}
+
+func (allowAll) AccountStatus(context.Context, string) (string, error) { return "active", nil }

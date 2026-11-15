@@ -101,6 +101,13 @@ func (s *UserService) loadProfile(ctx context.Context, userID string, lock bool)
 	return p, nil
 }
 
+// AccountStatus returns users.status for the auth middleware, so a banned or
+// deleted account is rejected even while its access token is still valid.
+func (s *UserService) AccountStatus(ctx context.Context, userID string) (string, error) {
+	_, status, err := s.users.LoadProfile(ctx, userID, false)
+	return status, err
+}
+
 // Me returns the caller's profile.
 func (s *UserService) Me(ctx context.Context, userID string) (model.Profile, error) {
 	return s.loadProfile(ctx, userID, false)

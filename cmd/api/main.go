@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -84,11 +85,11 @@ func main() {
 		repository.NewInviteCodeRepo(pool), tx, cfg.CodeTTLDays, time.Now)
 
 	authHandler := handler.NewAuthHandler(authSvc, cfg.DevLoginEnabled, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{})
-	userHandler := handler.NewUserHandler(userSvc, middleware.Auth(issuer))
+	userHandler := handler.NewUserHandler(userSvc, middleware.Auth(issuer, userSvc))
 	router := server.NewRouter(log, health, authHandler, userHandler)
 
 	log.Info("starting api", "app_env", cfg.AppEnv, "port", cfg.AppPort)
-	if err := server.Run(ctx, ":"+strconv.Itoa(cfg.AppPort), router, log); err != nil {
+	if err := server.Run(ctx, net.JoinHostPort(cfg.AppHost, strconv.Itoa(cfg.AppPort)), router, log); err != nil {
 		log.Error("server stopped", "error", err.Error())
 		os.Exit(1)
 	}

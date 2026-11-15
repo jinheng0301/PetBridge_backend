@@ -21,7 +21,7 @@ func newRouter(t *testing.T) (*gin.Engine, func(q string, args ...any)) {
 	authSvc, userSvc, iss, pool := newServices(t)
 	r := server.NewRouter(logger.New("debug", &bytes.Buffer{}), handler.NewHealthHandler(okProbe, okProbe),
 		handler.NewAuthHandler(authSvc, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}),
-		handler.NewUserHandler(userSvc, middleware.Auth(iss)))
+		handler.NewUserHandler(userSvc, middleware.Auth(iss, userSvc)))
 	exec := func(q string, args ...any) {
 		if _, err := pool.Exec(bg, q, args...); err != nil {
 			t.Fatal(err)
