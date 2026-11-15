@@ -522,12 +522,18 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 
 ```
 0. 前置：限流检查（Redis，见第 12 章）
-0a. SELECT 1 FROM users WHERE id=$me FOR UPDATE
+0a. SELECT 1 FROM users WHERE id=$me FOR NO KEY UPDATE
+      （不能用 FOR UPDATE：第 5 步写 invite_edges.inviter_id 时外键检查要给对方用户行加 KEY SHARE 锁，
+        A 进 B 的房、B 进 A 的房并发时会互相等待而死锁；FOR NO KEY UPDATE 与自身仍互斥）
       （串行化同一用户的并发入房，否则两个并发请求会同时通过“最多 2 间房”的检查）
-1. SELECT * FROM invite_codes WHERE code=$1 FOR UPDATE
+1. 先查出码所属房间（不加锁），锁住该房间全部 status=unused 的码（ORDER BY code FOR UPDATE），
+      再 SELECT * FROM invite_codes WHERE code=$1 FOR UPDATE。
+      （先锁整组 unused 码：房间被填满时赢家要作废该房间所有 unused 码，其中包含另一位入房者已锁住的码，
+        若各自只锁自己的码，会在“抢最后一席”时死锁。按 code 排序是为了让所有事务顺序一致）
       → 不存在/已过期/已作废：回滚，返回 CODE_INVALID（对外不区分原因）
-      → 已用且 used_by=自己，且自己此刻仍是该码所属房间的在席成员：视为重放（客户端超时重试），
-        返回首次入房的结果与奖励码，不再校验、不计失败
+      → 已用且 used_by=自己，且自己此刻仍是该码所属房间的在席成员：视为重放（客户端数秒内的超时重试），
+        返回当前房间、座位与首次的奖励码；不重复入房、不重复发奖励、不计失败，也不清零失败计数
+        （否则已入房的用户可靠重放旧码无限重置计数，绕过冷却）；已过期的已用码重放同样是 CODE_INVALID
       → 已用且不满足上一条（他人用过，或自己已退出/被移除）：CODE_INVALID
 1a. 按 id 升序一次锁定两间房：码所属房间、用户自己的小屋（SELECT ... WHERE id IN (...) ORDER BY id FOR UPDATE）。
       奖励码要写进自己的小屋，所以一次入房涉及两间房；统一升序加锁才不会在“A 进 B 的房、B 进 A 的房”并发时互相等待
@@ -544,7 +550,7 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
       → 0 行：返回 ROOM_FULL（不计入失败冷却）
 3. 取最小空位号，INSERT room_members（“已在房”已在 1b 判断，唯一索引仅作兜底）
 4. UPDATE invite_codes SET status='used', used_by, used_at
-5. INSERT invite_edges；INSERT reward_grants ON CONFLICT DO NOTHING（即使本次奖励数量为 0 也写入，granted_count=0，
+5. INSERT invite_edges（zero 码没有持有人，邀请人记为该房房主）；INSERT reward_grants ON CONFLICT DO NOTHING（即使本次奖励数量为 0 也写入，granted_count=0，
       否则用户可退出再加入同一房间，在腾出空位后刷奖励）
       → 本次真正插入才生成奖励码（invite_codes.reward_for 记录触发它的码，供重放回读），绑定到**用户自己的小屋**；数量 = min(app_config 配置值, 自己小屋空位数 − 现有未用有效码数)，下限 0，并受终身上限 20 约束（口径：除种子码外所有来源累计，见 PRD R6）
 6. 若 member_count = capacity：rooms.status='full'；
@@ -554,7 +560,7 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 
 **为什么不需要分布式锁**：竞争只发生在同一个房间的 5 个席位上，`UPDATE ... WHERE member_count < capacity` 是数据库级原子条件更新，多人同时抢最后一个席位时只有一个能得到 `RETURNING` 行。热点房间的锁竞争范围天然被 5 人上限限制住了。
 
-**统一加锁顺序（防死锁）**：凡是同时涉及多张表的事务（入房、踢人、解散、补码、退出），一律按 `users → invite_codes → rooms → room_members` 的顺序加锁，不得反向。入房事务是“码 → 房间”，所以解散房间时也必须先作废码、再改房间。同一事务需要锁多间房时（入房：目标房 + 自己的小屋），按房间 id 升序一次锁定。
+**统一加锁顺序（防死锁）**：凡是同时涉及多张表的事务（入房、踢人、解散、补码、退出），一律按 `users → invite_codes → rooms → room_members` 的顺序加锁，不得反向。入房事务是“码 → 房间”，所以解散房间时也必须先作废码、再改房间，且“先作废码”要按与入房相同的顺序锁定：先把该房间全部 unused 码按 code 排序 `FOR UPDATE`，再锁房间，不得直接 `UPDATE invite_codes ... WHERE room_id=...`（按扫描顺序加锁会与入房成环）。同一事务需要锁多间房时（入房：目标房 + 自己的小屋），按房间 id 升序一次锁定。
 
 **限流顺序与失败计数**：事务前依次为 ①用户冷却检查（命中即 CODE_COOLDOWN，不计入 IP 次数）→ ②IP 计数 +1，超限 RATE_LIMITED → ③onboarding 检查 → 事务。只有 CODE_INVALID（含格式错误的码）计入 10 分钟 5 次的失败；ROOM_FULL、ALREADY_MEMBER、ROOM_LIMIT、AGE_RESTRICTED 不计入，也不消耗码。Redis 不可用时改用进程内计数，IP 上限收紧为每小时 15 次。
 
@@ -636,7 +642,8 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 
 ```
 1. 校验：调用者是房主
-2. UPDATE invite_codes SET status='void' WHERE room_id=$r AND status='unused'   （先码，后房间）
+2. 先按 code 排序锁定该房间全部 unused 码（SELECT code FROM invite_codes WHERE room_id=$r AND status='unused' ORDER BY code FOR UPDATE，
+   与入房 7.2 第 1 步同序），再 UPDATE invite_codes SET status='void' WHERE room_id=$r AND status='unused'   （先码，后房间）
 3. UPDATE room_members SET left_at=now(), left_reason='dissolved'
       WHERE room_id=$r AND user_id <> owner_id AND left_at IS NULL
 4. UPDATE rooms SET member_count=1, status='open' WHERE id=$r
