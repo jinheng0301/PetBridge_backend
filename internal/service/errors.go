@@ -5,6 +5,7 @@ package service
 import (
 	"errors"
 	"strings"
+	"time"
 )
 
 var (
@@ -12,7 +13,29 @@ var (
 	ErrRefreshInvalid  = errors.New("refresh token invalid")
 	ErrRefreshReused   = errors.New("refresh token reused")
 	ErrUserNotFound    = errors.New("user not found")
+
+	ErrOnboardingRequired = errors.New("onboarding required")
+	ErrCodeInvalid        = errors.New("invite code invalid")
+	ErrRoomFull           = errors.New("room full")
+	ErrRoomLimit          = errors.New("room limit reached")
+	ErrAgeRestricted      = errors.New("age restricted")
+	ErrRoomNotFound       = errors.New("room not found")
 )
+
+// AlreadyMemberError reports that the user already belongs to RoomID.
+type AlreadyMemberError struct{ RoomID string }
+
+func (e *AlreadyMemberError) Error() string { return "already a member of room " + e.RoomID }
+
+// CooldownError reports a join cooldown that ends after RetryAfter.
+type CooldownError struct{ RetryAfter time.Duration }
+
+func (e *CooldownError) Error() string { return "join cooldown active" }
+
+// RateLimitedError reports a rate limit that lifts after RetryAfter.
+type RateLimitedError struct{ RetryAfter time.Duration }
+
+func (e *RateLimitedError) Error() string { return "rate limited" }
 
 // ValidationError lists the names of the invalid request fields.
 type ValidationError struct{ Fields []string }

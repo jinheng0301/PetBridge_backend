@@ -14,18 +14,21 @@ import (
 )
 
 type Config struct {
-	AppEnv          string
-	AppHost         string // listen address; 127.0.0.1 by default when APP_ENV=local
-	AppPort         int
-	LogLevel        string
-	DatabaseURL     string
-	RedisURL        string
-	JWTSigningKey   string
-	AccessTokenTTL  time.Duration
-	RefreshTokenTTL time.Duration
-	DevLoginEnabled bool
-	CodeTTLDays     int
-	AIProvider      string
+	AppEnv                string
+	AppHost               string // listen address; 127.0.0.1 by default when APP_ENV=local
+	AppPort               int
+	LogLevel              string
+	DatabaseURL           string
+	RedisURL              string
+	JWTSigningKey         string
+	AccessTokenTTL        time.Duration
+	RefreshTokenTTL       time.Duration
+	DevLoginEnabled       bool
+	CodeTTLDays           int
+	RewardCodeCount       int // reward invite codes granted per successful join; 0 disables
+	RewardCodeLifetimeCap int // max reward codes a user can ever receive
+	OwnerRegenDailyLimit  int // owner code regenerations allowed per day
+	AIProvider            string
 }
 
 // ValidationError lists every configuration problem found. Problems contain
@@ -107,6 +110,24 @@ func Load(getenv func(string) string) (*Config, error) {
 		add("CODE_TTL_DAYS must be an integer between 1 and 365")
 	}
 	c.CodeTTLDays = ttlDays
+
+	rewardCount, err := strconv.Atoi(get("REWARD_CODE_COUNT", "3"))
+	if err != nil || rewardCount < 0 || rewardCount > 5 {
+		add("REWARD_CODE_COUNT must be an integer between 0 and 5")
+	}
+	c.RewardCodeCount = rewardCount
+
+	rewardCap, err := strconv.Atoi(get("REWARD_CODE_LIFETIME_CAP", "20"))
+	if err != nil || rewardCap < 1 {
+		add("REWARD_CODE_LIFETIME_CAP must be an integer of at least 1")
+	}
+	c.RewardCodeLifetimeCap = rewardCap
+
+	regenLimit, err := strconv.Atoi(get("OWNER_REGEN_DAILY_LIMIT", "3"))
+	if err != nil || regenLimit < 1 {
+		add("OWNER_REGEN_DAILY_LIMIT must be an integer of at least 1")
+	}
+	c.OwnerRegenDailyLimit = regenLimit
 
 	dev, err := strconv.ParseBool(get("DEV_LOGIN_ENABLED", "false"))
 	if err != nil {

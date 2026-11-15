@@ -231,3 +231,44 @@ func TestLoad_RedisURLMustBeWellFormed(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_BusinessDefaults(t *testing.T) {
+	c, err := Load(env(required()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RewardCodeCount != 3 || c.RewardCodeLifetimeCap != 20 || c.OwnerRegenDailyLimit != 3 {
+		t.Fatalf("unexpected business defaults: %d/%d/%d",
+			c.RewardCodeCount, c.RewardCodeLifetimeCap, c.OwnerRegenDailyLimit)
+	}
+}
+
+func TestLoad_BusinessValuesInvalid(t *testing.T) {
+	cases := []struct{ name, val string }{
+		{"REWARD_CODE_COUNT", "-1"},
+		{"REWARD_CODE_COUNT", "6"},
+		{"REWARD_CODE_COUNT", "x"},
+		{"REWARD_CODE_LIFETIME_CAP", "0"},
+		{"OWNER_REGEN_DAILY_LIMIT", "0"},
+	}
+	for _, tc := range cases {
+		_, err := Load(env(with(required(), tc.name, tc.val)))
+		p := problems(t, err)
+		if !strings.Contains(p, tc.name) {
+			t.Errorf("%s=%q not reported: %s", tc.name, tc.val, p)
+		}
+		if strings.Contains(p, tc.val) {
+			t.Errorf("%s=%q: problems leak the value: %s", tc.name, tc.val, p)
+		}
+	}
+}
+
+func TestLoad_RewardCountZeroAllowed(t *testing.T) {
+	c, err := Load(env(with(required(), "REWARD_CODE_COUNT", "0")))
+	if err != nil {
+		t.Fatalf("REWARD_CODE_COUNT=0 rejected: %v", err)
+	}
+	if c.RewardCodeCount != 0 {
+		t.Fatalf("RewardCodeCount = %d, want 0", c.RewardCodeCount)
+	}
+}

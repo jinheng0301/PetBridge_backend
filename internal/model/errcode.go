@@ -15,6 +15,19 @@ const (
 	CodeRefreshReused         = "REFRESH_REUSED"
 	CodeRefreshInvalid        = "REFRESH_INVALID"
 	CodeProviderNotConfigured = "PROVIDER_NOT_CONFIGURED"
+
+	CodeOnboardingRequired = "ONBOARDING_REQUIRED"
+	CodeCodeInvalid        = "CODE_INVALID"
+	CodeRoomFull           = "ROOM_FULL"
+	CodeAlreadyMember      = "ALREADY_MEMBER"
+	CodeRoomLimit          = "ROOM_LIMIT"
+	CodeAgeRestricted      = "AGE_RESTRICTED"
+	CodeCodeCooldown       = "CODE_COOLDOWN"
+	CodeRateLimited        = "RATE_LIMITED"
+	CodeRoomNotFound       = "ROOM_NOT_FOUND"
+	CodeNotRoomOwner       = "NOT_ROOM_OWNER"
+	CodeOwnerCannotLeave   = "OWNER_CANNOT_LEAVE"
+	CodeCodeIssueLimit     = "CODE_ISSUE_LIMIT"
 )
 
 // ErrNotFound is returned by repositories when a row does not exist.
