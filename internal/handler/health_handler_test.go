@@ -1,11 +1,13 @@
 package handler_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/jinheng0301/petbridge/internal/handler"
 	"github.com/jinheng0301/petbridge/internal/middleware"
+	"github.com/jinheng0301/petbridge/internal/platform/logger"
 )
 
 var (
@@ -85,5 +88,37 @@ func TestReadyz_ProbeTimeout(t *testing.T) {
 	}
 	if w.Code != 503 {
 		t.Fatalf("want 503 when db probe times out, got %d", w.Code)
+	}
+}
+
+func TestReadyz_ProbeErrorsAreLoggedNotReturned(t *testing.T) {
+	cause := errors.New("wrongpass-secret-detail")
+	failing := handler.Probe(func(context.Context) error { return cause })
+
+	for name, h := range map[string]*handler.HealthHandler{
+		"db":    handler.NewHealthHandler(failing, up),
+		"redis": handler.NewHealthHandler(up, failing),
+	} {
+		var logs bytes.Buffer
+		r := gin.New()
+		r.Use(middleware.RequestID(), middleware.AccessLog(logger.New("debug", &logs)))
+		r.GET("/readyz", h.Readyz)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if !strings.Contains(logs.String(), "wrongpass-secret-detail") {
+			t.Errorf("%s: cause missing from access log: %s", name, logs.String())
+		}
+		if strings.Contains(w.Body.String(), "wrongpass-secret-detail") {
+			t.Errorf("%s: cause leaked to client: %s", name, w.Body.String())
+		}
+	}
+}
+
+func TestReadyz_ProbesRunConcurrently(t *testing.T) {
+	slow := handler.Probe(func(ctx context.Context) error { time.Sleep(700 * time.Millisecond); return nil })
+	start := time.Now()
+	w := callHealth(handler.NewHealthHandler(slow, slow), "/readyz")
+	if w.Code != 200 || time.Since(start) > 1200*time.Millisecond {
+		t.Fatalf("status %d after %v, probes look serial", w.Code, time.Since(start))
 	}
 }

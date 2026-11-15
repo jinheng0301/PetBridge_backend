@@ -1,4 +1,4 @@
-# Smoke test: /healthz and /readyz must return 200, then (when dev login is
+# Smoke test: /healthz must return 200 and /readyz must report status ok, then (when dev login is
 # enabled) login -> onboarding -> GET /me. Later batches add join room -> send message.
 $ErrorActionPreference = 'Stop'
 
@@ -17,6 +17,11 @@ foreach ($path in '/healthz', '/readyz') {
         $r = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 5
         Write-Host "$($r.StatusCode) $url $($r.Content)"
         if ($r.StatusCode -ne 200) { $failed = $true }
+        # "degraded" (Redis down or misconfigured) is also HTTP 200, so read the body.
+        if ($path -eq '/readyz' -and ($r.Content | ConvertFrom-Json).data.status -ne 'ok') {
+            Write-Host "FAIL $url : status is not ok (is Redis running? try: task up)"
+            $failed = $true
+        }
     } catch {
         Write-Host "FAIL $url : $($_.Exception.Message)"
         $failed = $true

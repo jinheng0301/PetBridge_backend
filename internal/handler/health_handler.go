@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -32,11 +34,22 @@ func (h *HealthHandler) Healthz(c *gin.Context) {
 // Readyz: PostgreSQL down -> 503; Redis down -> 200 "degraded" (Redis failure
 // must not stop message delivery, see TRD 12.2); both up -> 200 "ok".
 func (h *HealthHandler) Readyz(c *gin.Context) {
-	if err := run(c.Request.Context(), h.db); err != nil {
+	// Probe both at once so two slow dependencies cost one timeout, not two.
+	var dbErr, redisErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); dbErr = run(c.Request.Context(), h.db) }()
+	go func() { defer wg.Done(); redisErr = run(c.Request.Context(), h.redis) }()
+	wg.Wait()
+
+	// c.Error keeps the cause in the access log; it is never sent to the client.
+	if dbErr != nil {
+		_ = c.Error(fmt.Errorf("readyz: database probe: %w", dbErr))
 		Fail(c, http.StatusServiceUnavailable, model.CodeNotReady, "database unavailable")
 		return
 	}
-	if err := run(c.Request.Context(), h.redis); err != nil {
+	if redisErr != nil {
+		_ = c.Error(fmt.Errorf("readyz: redis probe: %w", redisErr))
 		OK(c, http.StatusOK, gin.H{"status": "degraded", "redis": "down"})
 		return
 	}
