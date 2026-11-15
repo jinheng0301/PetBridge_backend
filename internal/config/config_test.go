@@ -13,6 +13,7 @@ func env(m map[string]string) func(string) string {
 
 func required() map[string]string {
 	return map[string]string{
+		"APP_ENV":         "local",
 		"DATABASE_URL":    "postgres://petbridge:petbridge@localhost:5432/petbridge",
 		"REDIS_URL":       "redis://localhost:6379/0",
 		"JWT_SIGNING_KEY": "local-dev-only-change-me",
@@ -88,6 +89,47 @@ func TestLoad_ProductionSelfCheck(t *testing.T) {
 		if p := problems(t, err); !strings.Contains(p, name) {
 			t.Errorf("%s not reported: %s", name, p)
 		}
+	}
+}
+
+func TestLoad_AppEnvIsRequired(t *testing.T) {
+	m := required()
+	delete(m, "APP_ENV")
+	_, err := Load(env(m))
+	if p := problems(t, err); !strings.Contains(p, "APP_ENV") {
+		t.Fatalf("not reported: %s", p)
+	}
+}
+
+func TestLoad_NonLocalRequiresStrongKeyAndTLS(t *testing.T) {
+	good := with(required(), "APP_ENV", "staging", "JWT_SIGNING_KEY", strings.Repeat("k", 32))
+	if _, err := Load(env(good)); err != nil {
+		t.Fatalf("valid staging config rejected: %v", err)
+	}
+	short := with(good, "JWT_SIGNING_KEY", "local-dev-only-change-me")
+	if p := problems(t, errOf(Load(env(short)))); !strings.Contains(p, "JWT_SIGNING_KEY") {
+		t.Errorf("short staging key not reported: %s", p)
+	}
+	noTLS := with(good, "DATABASE_URL", "postgres://u:p@h/db?sslmode=disable")
+	if p := problems(t, errOf(Load(env(noTLS)))); !strings.Contains(p, "DATABASE_URL") {
+		t.Errorf("sslmode=disable not reported: %s", p)
+	}
+}
+
+func errOf(_ *Config, err error) error { return err }
+
+func TestLoad_HostDefaults(t *testing.T) {
+	c, _ := Load(env(required()))
+	if c.AppHost != "127.0.0.1" {
+		t.Errorf("local host = %q, want 127.0.0.1", c.AppHost)
+	}
+	c, err := Load(env(with(required(), "APP_ENV", "staging", "JWT_SIGNING_KEY", strings.Repeat("k", 32))))
+	if err != nil || c.AppHost != "0.0.0.0" {
+		t.Errorf("staging host = %v, err %v", c, err)
+	}
+	c, _ = Load(env(with(required(), "APP_HOST", "0.0.0.0")))
+	if c.AppHost != "0.0.0.0" {
+		t.Errorf("override ignored: %q", c.AppHost)
 	}
 }
 

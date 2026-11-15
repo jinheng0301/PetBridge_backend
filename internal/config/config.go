@@ -14,6 +14,7 @@ import (
 
 type Config struct {
 	AppEnv          string
+	AppHost         string // listen address; 127.0.0.1 by default when APP_ENV=local
 	AppPort         int
 	LogLevel        string
 	DatabaseURL     string
@@ -72,14 +73,22 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 
 	c := &Config{
-		AppEnv:        get("APP_ENV", "local"),
+		AppEnv:        required("APP_ENV"), // no default: a missing value must not silently relax checks
 		LogLevel:      get("LOG_LEVEL", "info"),
 		AIProvider:    get("AI_PROVIDER", "fake"),
 		DatabaseURL:   required("DATABASE_URL"),
 		RedisURL:      required("REDIS_URL"),
 		JWTSigningKey: required("JWT_SIGNING_KEY"),
 	}
-	oneOf("APP_ENV", c.AppEnv, "local", "staging", "production")
+	if c.AppEnv != "" {
+		oneOf("APP_ENV", c.AppEnv, "local", "staging", "production")
+	}
+	defHost := "0.0.0.0"
+	if c.AppEnv == "local" {
+		// Dev login has no password: keep local servers off the LAN unless asked.
+		defHost = "127.0.0.1"
+	}
+	c.AppHost = get("APP_HOST", defHost)
 	oneOf("LOG_LEVEL", c.LogLevel, "debug", "info", "warn", "error")
 	oneOf("AI_PROVIDER", c.AIProvider, "fake", "live")
 
@@ -107,12 +116,15 @@ func Load(getenv func(string) string) (*Config, error) {
 	if c.AppEnv != "local" && c.DevLoginEnabled {
 		add("DEV_LOGIN_ENABLED must be false unless APP_ENV=local")
 	}
-	if c.AppEnv == "production" {
-		if c.AIProvider != "live" {
-			add("AI_PROVIDER must be live when APP_ENV=production")
-		}
+	if c.AppEnv == "production" && c.AIProvider != "live" {
+		add("AI_PROVIDER must be live when APP_ENV=production")
+	}
+	if c.AppEnv != "" && c.AppEnv != "local" {
 		if c.JWTSigningKey != "" && len(c.JWTSigningKey) < 32 {
-			add("JWT_SIGNING_KEY must be at least 32 characters when APP_ENV=production")
+			add("JWT_SIGNING_KEY must be at least 32 characters unless APP_ENV=local")
+		}
+		if strings.Contains(strings.ToLower(c.DatabaseURL), "sslmode=disable") {
+			add("DATABASE_URL must not use sslmode=disable unless APP_ENV=local")
 		}
 	}
 
