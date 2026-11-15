@@ -216,3 +216,18 @@ func TestLoadDB_OnlyNeedsEnvAndDatabaseURL(t *testing.T) {
 		t.Errorf("sslmode=disable in staging not reported: %s", p)
 	}
 }
+
+func TestLoad_RedisURLMustBeWellFormed(t *testing.T) {
+	for _, v := range []string{"redis//host:6379", "http://host:6379", "host:6379", "redis://%zz"} {
+		_, err := Load(env(with(required(), "REDIS_URL", v)))
+		p := problems(t, err)
+		if !strings.Contains(p, "REDIS_URL") || strings.Contains(p, v) {
+			t.Errorf("REDIS_URL=%q: %s", v, p)
+		}
+	}
+	for _, v := range []string{"redis://localhost:6379/0", "rediss://:pw@host:6380/1"} {
+		if _, err := Load(env(with(required(), "REDIS_URL", v))); err != nil {
+			t.Errorf("REDIS_URL=%q rejected: %v", v, err)
+		}
+	}
+}

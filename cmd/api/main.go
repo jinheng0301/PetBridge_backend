@@ -12,8 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/jinheng0301/petbridge/internal/config"
 	"github.com/jinheng0301/petbridge/internal/handler"
 	"github.com/jinheng0301/petbridge/internal/middleware"
@@ -53,26 +51,21 @@ func main() {
 	defer pool.Close()
 
 	// Redis is optional at startup: the service degrades instead of failing (TRD 12.2).
-	rdb, err := pbredis.Open(ctx, cfg.RedisURL)
+	// A malformed URL is a config error and stops startup; only a failed
+	// connection degrades. The client is lazy, so it reconnects once Redis is back.
+	rdb, err := pbredis.New(cfg.RedisURL)
 	if err != nil {
-		log.Warn("redis unavailable, starting degraded", "error", err.Error())
-		// Lazy client: go-redis reconnects on its own once Redis is back.
-		if opt, perr := redis.ParseURL(cfg.RedisURL); perr == nil {
-			rdb = redis.NewClient(opt)
-		}
+		log.Error("invalid redis configuration", "error", err.Error())
+		os.Exit(1)
 	}
-	if rdb != nil {
-		defer rdb.Close()
+	defer rdb.Close()
+	if err := pbredis.Ping(ctx, rdb); err != nil {
+		log.Warn("redis unavailable, starting degraded", "error", err.Error())
 	}
 
 	health := handler.NewHealthHandler(
 		func(c context.Context) error { return db.Ping(c, pool) },
-		func(c context.Context) error {
-			if rdb == nil {
-				return fmt.Errorf("redis not configured")
-			}
-			return pbredis.Ping(c, rdb)
-		},
+		func(c context.Context) error { return pbredis.Ping(c, rdb) },
 	)
 
 	// repository -> service -> handler

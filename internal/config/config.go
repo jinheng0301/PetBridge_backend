@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -112,6 +113,14 @@ func Load(getenv func(string) string) (*Config, error) {
 		add("DEV_LOGIN_ENABLED must be true or false")
 	}
 	c.DevLoginEnabled = dev
+
+	if c.RedisURL != "" {
+		// A malformed URL is a deployment mistake, not an outage: fail fast
+		// instead of silently running without Redis.
+		if u, err := url.Parse(c.RedisURL); err != nil || (u.Scheme != "redis" && u.Scheme != "rediss" && u.Scheme != "unix") {
+			add("REDIS_URL must be a redis://, rediss:// or unix:// URL")
+		}
+	}
 
 	if c.AppEnv != "local" && c.DevLoginEnabled {
 		add("DEV_LOGIN_ENABLED must be false unless APP_ENV=local")
