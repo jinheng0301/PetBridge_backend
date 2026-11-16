@@ -57,3 +57,8 @@ type CodeListItem struct {
 	ExpiresAt time.Time `json:"expires_at"`
 	Room      RoomInfo  `json:"room"`
 }
+
+// RoomResult is the body of the remove and dissolve responses.
+type RoomResult struct {
+	Room RoomSummary `json:"room"`
+}

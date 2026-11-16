@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -78,4 +79,43 @@ func (r *RoomMemberRepo) ListMembers(ctx context.Context, roomID string) ([]mode
 		err := row.Scan(&m.UserID, &m.Nickname, &m.PetType, &m.SeatNo, &m.Role)
 		return m, err
 	})
+}
+
+// Leave marks the user's active seat as left with the given reason
+// (left|kicked|dissolved). left=false means the user was not seated.
+func (r *RoomMemberRepo) Leave(ctx context.Context, roomID, userID, reason string, at time.Time) (bool, error) {
+	if !uuidRE.MatchString(roomID) || !uuidRE.MatchString(userID) {
+		return false, nil
+	}
+	tag, err := conn(ctx, r.pool).Exec(ctx, `update room_members set left_at=$3, left_reason=$4
+		where room_id=$1 and user_id=$2 and left_at is null`, roomID, userID, at, reason)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// EverMember reports whether the user has any membership row in the room,
+// active or not.
+func (r *RoomMemberRepo) EverMember(ctx context.Context, roomID, userID string) (bool, error) {
+	if !uuidRE.MatchString(roomID) || !uuidRE.MatchString(userID) {
+		return false, nil
+	}
+	var ok bool
+	err := conn(ctx, r.pool).QueryRow(ctx,
+		`select exists(select 1 from room_members where room_id=$1 and user_id=$2)`, roomID, userID).Scan(&ok)
+	return ok, err
+}
+
+// DissolveMembers moves every active non-owner out of the room and returns
+// their ids by seat.
+func (r *RoomMemberRepo) DissolveMembers(ctx context.Context, roomID string, at time.Time) ([]string, error) {
+	rows, err := conn(ctx, r.pool).Query(ctx, `with d as (
+			update room_members set left_at=$2, left_reason='dissolved'
+			where room_id=$1 and role<>'owner' and left_at is null returning user_id, seat_no)
+		select user_id::text from d order by seat_no`, roomID, at)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }

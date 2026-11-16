@@ -56,3 +56,10 @@ func IsUniqueViolation(err error) bool {
 	var pe *pgconn.PgError
 	return errors.As(err, &pe) && pe.Code == "23505"
 }
+
+// IsRetryableTxError reports a deadlock (40P01) or serialization failure
+// (40001): the transaction was rolled back and may be run again.
+func IsRetryableTxError(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && (pe.Code == "40P01" || pe.Code == "40001")
+}

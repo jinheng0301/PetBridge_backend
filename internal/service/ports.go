@@ -45,6 +45,12 @@ type RoomStore interface {
 	MarkFull(ctx context.Context, roomID string) error
 	// ListForMember returns the user's active rooms, own room first, members filled in.
 	ListForMember(ctx context.Context, userID string) ([]model.RoomDetail, error)
+	// Peek reads a room without locking; unknown or malformed ids return model.ErrNotFound.
+	Peek(ctx context.Context, roomID string) (model.RoomState, error)
+	// Vacate frees one seat (member_count-1); a full room reopens.
+	Vacate(ctx context.Context, roomID string) (memberCount int, err error)
+	// Reset leaves only the owner and reopens the room.
+	Reset(ctx context.Context, roomID string) error
 }
 
 type RoomMemberStore interface {
@@ -55,6 +61,12 @@ type RoomMemberStore interface {
 	// AddMember takes the smallest free seat (1..5) with role 'member'.
 	AddMember(ctx context.Context, roomID, userID string) (seatNo int, err error)
 	ListMembers(ctx context.Context, roomID string) ([]model.MemberInfo, error)
+	// Leave ends the user's active seat with reason left|kicked|dissolved; left=false when not seated.
+	Leave(ctx context.Context, roomID, userID, reason string, at time.Time) (left bool, err error)
+	// EverMember reports any membership row, active or not.
+	EverMember(ctx context.Context, roomID, userID string) (bool, error)
+	// DissolveMembers ends every active non-owner seat and returns their ids by seat.
+	DissolveMembers(ctx context.Context, roomID string, at time.Time) (userIDs []string, err error)
 }
 
 type InviteCodeStore interface {
@@ -77,10 +89,15 @@ type InviteCodeStore interface {
 	RewardsFor(ctx context.Context, forCode string) ([]model.CodeInfo, error)
 	// ListForUser reports the effective status (unused and expired -> expired), newest first.
 	ListForUser(ctx context.Context, userID string, now time.Time) ([]model.CodeListItem, error)
+	// InsertRegen stores an owner_regen code with an explicit issued_at; inserted=false on a code collision.
+	InsertRegen(ctx context.Context, code, roomID, ownerID string, issuedAt, expiresAt time.Time) (inserted bool, err error)
+	// CountRegenBetween counts the owner's owner_regen codes issued in [from, to).
+	CountRegenBetween(ctx context.Context, ownerID string, from, to time.Time) (int, error)
 }
 
 type BanStore interface {
 	IsBanned(ctx context.Context, roomID, userID string) (bool, error)
+	Ban(ctx context.Context, roomID, userID, bannedBy string) error
 }
 
 // JoinGuard applies the join-by-code limits (design 5.3); ratelimit.JoinGuard implements it.

@@ -3,10 +3,12 @@ package repository_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/jinheng0301/petbridge/internal/model"
@@ -477,5 +479,212 @@ func TestIsBanned(t *testing.T) {
 	}
 	if b, err := bans.IsBanned(bg, room, u); err != nil || !b {
 		t.Fatalf("b=%v err=%v", b, err)
+	}
+}
+
+func mkMember(t *testing.T, p *pgxpool.Pool, room, user string) int {
+	t.Helper()
+	seat, err := repository.NewRoomMemberRepo(p).AddMember(bg, room, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Exec(bg, `update rooms set member_count=member_count+1 where id=$1`, room); err != nil {
+		t.Fatal(err)
+	}
+	return seat
+}
+
+func TestRoomRepo_PeekVacateReset(t *testing.T) {
+	p := dbtest.Reset(t)
+	repo := repository.NewRoomRepo(p)
+	owner := mkUser(t, p)
+	room := mkRoom(t, p, owner)
+
+	got, err := repo.Peek(bg, room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked, err := repo.LockRooms(bg, room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != locked[room] {
+		t.Fatalf("Peek=%+v want %+v", got, locked[room])
+	}
+	for _, id := range []string{"abc", "00000000-0000-0000-0000-000000000000"} {
+		if _, err := repo.Peek(bg, id); !errors.Is(err, model.ErrNotFound) {
+			t.Fatalf("Peek(%q) err=%v, want ErrNotFound", id, err)
+		}
+	}
+
+	// A full room reopens on Vacate; an open one keeps its status.
+	if _, err := p.Exec(bg, `update rooms set member_count=5, status='full' where id=$1`, room); err != nil {
+		t.Fatal(err)
+	}
+	n, err := repo.Vacate(bg, room)
+	if err != nil || n != 4 {
+		t.Fatalf("Vacate n=%d err=%v, want 4", n, err)
+	}
+	if s := roomStatus(t, p, room); s != "open" {
+		t.Fatalf("status after Vacate of full room = %s", s)
+	}
+	if n, err = repo.Vacate(bg, room); err != nil || n != 3 {
+		t.Fatalf("second Vacate n=%d err=%v", n, err)
+	}
+	if err := repo.Reset(bg, room); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = repo.Peek(bg, room)
+	if got.MemberCount != 1 || got.Status != "open" {
+		t.Fatalf("after Reset: %+v", got)
+	}
+}
+
+func roomStatus(t *testing.T, p *pgxpool.Pool, room string) string {
+	t.Helper()
+	var s string
+	if err := p.QueryRow(bg, `select status from rooms where id=$1`, room).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestMemberRepo_LeaveEverMemberDissolve(t *testing.T) {
+	p := dbtest.Reset(t)
+	repo := repository.NewRoomMemberRepo(p)
+	owner, a, b, stranger := mkUser(t, p), mkUser(t, p), mkUser(t, p), mkUser(t, p)
+	room := mkRoom(t, p, owner)
+	if s := mkMember(t, p, room, a); s != 2 {
+		t.Fatalf("seat a=%d", s)
+	}
+	mkMember(t, p, room, b)
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+
+	left, err := repo.Leave(bg, room, a, "kicked", at)
+	if err != nil || !left {
+		t.Fatalf("first Leave left=%v err=%v", left, err)
+	}
+	if left, err = repo.Leave(bg, room, a, "kicked", at); err != nil || left {
+		t.Fatalf("second Leave left=%v err=%v, want false", left, err)
+	}
+	var reason string
+	if err := p.QueryRow(bg, `select left_reason from room_members where room_id=$1 and user_id=$2`, room, a).Scan(&reason); err != nil || reason != "kicked" {
+		t.Fatalf("left_reason=%q err=%v", reason, err)
+	}
+	if left, err = repo.Leave(bg, "abc", a, "left", at); err != nil || left {
+		t.Fatalf("Leave(bad room) left=%v err=%v", left, err)
+	}
+	if left, err = repo.Leave(bg, room, "abc", "left", at); err != nil || left {
+		t.Fatalf("Leave(bad user) left=%v err=%v", left, err)
+	}
+
+	for _, c := range []struct {
+		user string
+		want bool
+	}{{a, true}, {b, true}, {owner, true}, {stranger, false}, {"abc", false}} {
+		got, err := repo.EverMember(bg, room, c.user)
+		if err != nil || got != c.want {
+			t.Fatalf("EverMember(%s)=%v err=%v, want %v", c.user, got, err, c.want)
+		}
+	}
+	if got, err := repo.EverMember(bg, "abc", a); err != nil || got {
+		t.Fatalf("EverMember(bad room)=%v err=%v", got, err)
+	}
+
+	// a's seat 2 is free again and is the smallest free seat.
+	c := mkUser(t, p)
+	if s, err := repo.AddMember(bg, room, c); err != nil || s != 2 {
+		t.Fatalf("AddMember seat=%d err=%v, want 2", s, err)
+	}
+
+	removed, err := repo.DissolveMembers(bg, room, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 2 || removed[0] != c || removed[1] != b {
+		t.Fatalf("DissolveMembers=%v want [%s %s] by seat", removed, c, b)
+	}
+	if ok, _ := repo.IsActiveMember(bg, room, owner); !ok {
+		t.Fatal("owner must stay seated")
+	}
+	if err := p.QueryRow(bg, `select left_reason from room_members where room_id=$1 and user_id=$2 and left_at is not null`, room, b).Scan(&reason); err != nil || reason != "dissolved" {
+		t.Fatalf("left_reason=%q err=%v", reason, err)
+	}
+	if removed, err = repo.DissolveMembers(bg, room, at); err != nil || len(removed) != 0 {
+		t.Fatalf("second DissolveMembers=%v err=%v", removed, err)
+	}
+}
+
+func TestBanRepo_Ban(t *testing.T) {
+	p := dbtest.Reset(t)
+	repo := repository.NewBanRepo(p)
+	owner, u := mkUser(t, p), mkUser(t, p)
+	room := mkRoom(t, p, owner)
+	if err := repo.Ban(bg, room, u, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Ban(bg, room, u, owner); err != nil {
+		t.Fatalf("second Ban: %v", err)
+	}
+	if ok, err := repo.IsBanned(bg, room, u); err != nil || !ok {
+		t.Fatalf("IsBanned=%v err=%v", ok, err)
+	}
+	if err := repo.Ban(bg, "abc", u, owner); err != nil {
+		t.Fatalf("Ban(bad room) must be a no-op, got %v", err)
+	}
+}
+
+func TestInviteRepo_Regen(t *testing.T) {
+	p := dbtest.Reset(t)
+	repo := repository.NewInviteCodeRepo(p)
+	owner := mkUser(t, p)
+	room := mkRoom(t, p, owner)
+	day := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	exp := day.Add(7 * 24 * time.Hour)
+
+	ok, err := repo.InsertRegen(bg, "REGENAAA", room, owner, day, exp)
+	if err != nil || !ok {
+		t.Fatalf("InsertRegen ok=%v err=%v", ok, err)
+	}
+	var source string
+	var issued time.Time
+	var to string
+	if err := p.QueryRow(bg, `select source, issued_at, issued_to::text from invite_codes where code='REGENAAA'`).Scan(&source, &issued, &to); err != nil {
+		t.Fatal(err)
+	}
+	if source != "owner_regen" || !issued.Equal(day) || to != owner {
+		t.Fatalf("row source=%s issued=%v to=%s", source, issued, to)
+	}
+	if ok, err = repo.InsertRegen(bg, "REGENAAA", room, owner, day, exp); err != nil || ok {
+		t.Fatalf("duplicate InsertRegen ok=%v err=%v", ok, err)
+	}
+	if ok, err = repo.InsertRegen(bg, "REGENBBB", room, owner, day.Add(time.Hour), exp); err != nil || !ok {
+		t.Fatal(err)
+	}
+	if ok, err = repo.InsertRegen(bg, "REGENCCC", room, owner, day.Add(24*time.Hour), exp); err != nil || !ok {
+		t.Fatal(err)
+	}
+	mkCode(t, p, "SGNUPAAA", room, &owner, "signup", "unused", exp) // other sources do not count
+
+	n, err := repo.CountRegenBetween(bg, owner, day, day.Add(24*time.Hour))
+	if err != nil || n != 2 {
+		t.Fatalf("CountRegenBetween=%d err=%v, want 2 (from inclusive, to exclusive)", n, err)
+	}
+}
+
+func TestIsRetryableTxError(t *testing.T) {
+	wrap := func(code string) error {
+		return fmt.Errorf("tx: %w", &pgconn.PgError{Code: code})
+	}
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{wrap("40P01"), true}, {wrap("40001"), true}, {wrap("23505"), false},
+		{nil, false}, {context.Canceled, false},
+	} {
+		if got := repository.IsRetryableTxError(c.err); got != c.want {
+			t.Errorf("IsRetryableTxError(%v)=%v want %v", c.err, got, c.want)
+		}
 	}
 }

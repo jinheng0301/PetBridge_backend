@@ -161,3 +161,23 @@ func (r *InviteCodeRepo) ListForUser(ctx context.Context, userID string, now tim
 		return it, err
 	})
 }
+
+// InsertRegen stores an owner self-service code. issuedAt is written
+// explicitly so the daily limit can be tested with an injected clock.
+// inserted=false means the code already exists.
+func (r *InviteCodeRepo) InsertRegen(ctx context.Context, code, roomID, ownerID string, issuedAt, expiresAt time.Time) (bool, error) {
+	tag, err := conn(ctx, r.pool).Exec(ctx, `insert into invite_codes(code, room_id, issued_to, source, issued_at, expires_at)
+		values($1,$2,$3,'owner_regen',$4,$5) on conflict (code) do nothing`, code, roomID, ownerID, issuedAt, expiresAt)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// CountRegenBetween counts the owner's self-service codes issued in [from, to).
+func (r *InviteCodeRepo) CountRegenBetween(ctx context.Context, ownerID string, from, to time.Time) (int, error) {
+	var n int
+	err := conn(ctx, r.pool).QueryRow(ctx, `select count(*) from invite_codes
+		where issued_to=$1 and source='owner_regen' and issued_at>=$2 and issued_at<$3`, ownerID, from, to).Scan(&n)
+	return n, err
+}

@@ -125,3 +125,33 @@ func (r *RoomRepo) ListForMember(ctx context.Context, userID string) ([]model.Ro
 	}
 	return details, mrows.Err()
 }
+
+// Peek reads a room without locking it. An unknown or malformed id returns
+// model.ErrNotFound.
+func (r *RoomRepo) Peek(ctx context.Context, roomID string) (model.RoomState, error) {
+	if !uuidRE.MatchString(strings.ToLower(roomID)) {
+		return model.RoomState{}, model.ErrNotFound
+	}
+	var s model.RoomState
+	err := conn(ctx, r.pool).QueryRow(ctx, `select id::text, owner_id::text, member_count, capacity, status
+		from rooms where id=$1`, roomID).Scan(&s.ID, &s.OwnerID, &s.MemberCount, &s.Capacity, &s.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.RoomState{}, model.ErrNotFound
+	}
+	return s, err
+}
+
+// Vacate frees one seat: member_count-1, and a full room reopens. The caller
+// holds the room lock.
+func (r *RoomRepo) Vacate(ctx context.Context, roomID string) (int, error) {
+	var n int
+	err := conn(ctx, r.pool).QueryRow(ctx, `update rooms set member_count=member_count-1,
+		status=case when status='full' then 'open' else status end where id=$1 returning member_count`, roomID).Scan(&n)
+	return n, err
+}
+
+// Reset returns a dissolved room to its initial state: only the owner, open.
+func (r *RoomRepo) Reset(ctx context.Context, roomID string) error {
+	_, err := conn(ctx, r.pool).Exec(ctx, `update rooms set member_count=1, status='open' where id=$1`, roomID)
+	return err
+}
