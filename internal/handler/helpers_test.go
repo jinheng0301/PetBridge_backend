@@ -92,13 +92,16 @@ func newApp(t *testing.T, counter ratelimit.Counter) *app {
 		repository.NewBanRepo(pool), repository.NewRewardRepo(pool), repository.NewTxManager(pool),
 		ratelimit.NewJoinGuard(counter), service.NopPublisher{},
 		service.JoinConfig{CodeTTLDays: 7, RewardCount: 3, RewardLifetimeCap: 20}, time.Now)
+	manageSvc := service.NewManageService(users, rooms, repository.NewRoomMemberRepo(pool), codes,
+		repository.NewBanRepo(pool), repository.NewTxManager(pool), service.NopPublisher{},
+		service.ManageConfig{CodeTTLDays: 7, RegenDailyLimit: 3, LifetimeCap: 20}, time.Now)
 	authn := middleware.Auth(iss, userSvc)
 	logs := &bytes.Buffer{}
 	r := server.NewRouter(logger.New("debug", logs), handler.NewHealthHandler(okProbe, okProbe),
 		handler.NewAuthHandler(authSvc, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
 			WithLoginLimit(middleware.RateLimitIP(counter, "login", 10, time.Minute)),
 		handler.NewUserHandler(userSvc, authn),
-		handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn),
+		handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn).WithManage(manageSvc),
 		handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn))
 	return &app{r: r, pool: pool, logs: logs}
 }

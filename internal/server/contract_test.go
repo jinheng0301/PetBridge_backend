@@ -46,12 +46,12 @@ func TestOpenAPI_RoutesMatchDocument(t *testing.T) {
 		handler.NewAuthHandler(nil, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
 			WithLoginLimit(limit),
 		handler.NewUserHandler(nil, authn),
-		handler.NewRoomHandler(nil, nil, authn),
+		handler.NewRoomHandler(nil, nil, authn).WithManage(nil),
 		handler.NewCodeHandler(nil, authn))
 
 	routes := map[string]bool{}
 	for _, ri := range r.Routes() {
-		routes[ri.Method+" "+ri.Path] = true
+		routes[ri.Method+" "+openAPIPath(ri.Path)] = true
 	}
 	docOps := map[string]bool{}
 	for path, item := range loadSpec(t).Paths.Map() {
@@ -101,3 +101,14 @@ func TestOpenAPI_EveryOperationDeclaresErrorEnvelope(t *testing.T) {
 type allowAll struct{}
 
 func (allowAll) AccountStatus(context.Context, string) (string, error) { return "active", nil }
+
+// openAPIPath rewrites Gin path parameters (/:id) as OpenAPI ones (/{id}).
+func openAPIPath(p string) string {
+	parts := strings.Split(p, "/")
+	for i, s := range parts {
+		if strings.HasPrefix(s, ":") {
+			parts[i] = "{" + s[1:] + "}"
+		}
+	}
+	return strings.Join(parts, "/")
+}

@@ -83,8 +83,11 @@ func main() {
 	// Rate limits live in Redis and fall back to in-process counters while it is down.
 	counter := ratelimit.NewFallback(ratelimit.NewRedis(rdb), ratelimit.NewMemory(time.Now),
 		newFallbackLogger(log, 30*time.Second, time.Now))
-	joinSvc := service.NewJoinService(users, rooms, members, codes, repository.NewBanRepo(pool),
-		repository.NewRewardRepo(pool), tx, ratelimit.NewJoinGuard(counter), service.NopPublisher{},
+	// A deadlock or serialization failure rolls the transaction back whole; run it once more.
+	retryTx := service.RetryTx{Inner: tx, Retryable: repository.IsRetryableTxError}
+	bans := repository.NewBanRepo(pool)
+	joinSvc := service.NewJoinService(users, rooms, members, codes, bans,
+		repository.NewRewardRepo(pool), retryTx, ratelimit.NewJoinGuard(counter), service.NopPublisher{},
 		service.JoinConfig{
 			CodeTTLDays:       cfg.CodeTTLDays,
 			RewardCount:       cfg.RewardCodeCount,
@@ -95,7 +98,13 @@ func main() {
 	authHandler := handler.NewAuthHandler(authSvc, cfg.DevLoginEnabled, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
 		WithLoginLimit(middleware.RateLimitIP(counter, "login", 10, time.Minute))
 	userHandler := handler.NewUserHandler(userSvc, authn)
-	roomHandler := handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn)
+	manageSvc := service.NewManageService(users, rooms, members, codes, bans, retryTx, service.NopPublisher{},
+		service.ManageConfig{
+			CodeTTLDays:     cfg.CodeTTLDays,
+			RegenDailyLimit: cfg.OwnerRegenDailyLimit,
+			LifetimeCap:     cfg.RewardCodeLifetimeCap,
+		}, time.Now)
+	roomHandler := handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn).WithManage(manageSvc)
 	codeHandler := handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn)
 	router := server.NewRouter(log, health, authHandler, userHandler, roomHandler, codeHandler)
 

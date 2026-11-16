@@ -11,11 +11,12 @@ import (
 	"github.com/jinheng0301/petbridge/internal/service"
 )
 
-// RoomHandler serves POST /rooms/join and GET /rooms/mine.
+// RoomHandler serves join, mine and (with WithManage) the owner-management routes.
 type RoomHandler struct {
-	join  *service.JoinService
-	rooms *service.RoomService
-	authn gin.HandlerFunc
+	join   *service.JoinService
+	rooms  *service.RoomService
+	manage *service.ManageService
+	authn  gin.HandlerFunc
 }
 
 func NewRoomHandler(join *service.JoinService, rooms *service.RoomService, authn gin.HandlerFunc) *RoomHandler {
@@ -27,6 +28,10 @@ func (h *RoomHandler) Routes(v1 *gin.RouterGroup) {
 	g := v1.Group("/rooms", h.authn)
 	g.POST("/join", h.joinRoom)
 	g.GET("/mine", h.mine)
+	g.DELETE("/:id/members/:user_id", h.removeMember)
+	g.POST("/:id/dissolve", h.dissolve)
+	g.POST("/:id/codes", h.regenCode)
+	g.POST("/:id/leave", h.leave)
 }
 
 func (h *RoomHandler) joinRoom(c *gin.Context) {
@@ -76,7 +81,18 @@ func failRoom(c *gin.Context, err error) {
 	var already *service.AlreadyMemberError
 	var cooldown *service.CooldownError
 	var limited *service.RateLimitedError
+	var issue *service.CodeIssueLimitError
 	switch {
+	case errors.Is(err, service.ErrRoomNotFound):
+		Fail(c, http.StatusNotFound, model.CodeRoomNotFound, "room not found")
+	case errors.Is(err, service.ErrNotRoomOwner):
+		Fail(c, http.StatusForbidden, model.CodeNotRoomOwner, "not the room owner")
+	case errors.Is(err, service.ErrOwnerCannotLeave):
+		Fail(c, http.StatusConflict, model.CodeOwnerCannotLeave, "the owner cannot leave; dissolve the room instead")
+	case errors.Is(err, service.ErrCannotRemoveOwner):
+		Fail(c, http.StatusBadRequest, model.CodeValidationFailed, "cannot remove the room owner")
+	case errors.As(err, &issue):
+		FailDetails(c, http.StatusConflict, model.CodeCodeIssueLimit, "cannot issue another code", gin.H{"reason": issue.Reason})
 	case errors.Is(err, service.ErrCodeInvalid):
 		Fail(c, http.StatusNotFound, model.CodeCodeInvalid, "invite code invalid")
 	case errors.Is(err, service.ErrRoomFull):
