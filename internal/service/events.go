@@ -10,7 +10,26 @@ import (
 const (
 	EventMemberJoined    = "member.joined"
 	EventCodeInvalidated = "code.invalidated"
+	EventMemberLeft      = "member.left"
+	EventRoomKicked      = "room.kicked"
 )
+
+// memberLeftEvent tells the remaining members that userID left, was kicked or
+// was dissolved out (reason left|kicked|dissolved).
+func memberLeftEvent(roomID, userID, reason string, to []string) Event {
+	return Event{Type: EventMemberLeft, RoomID: roomID, To: to,
+		Data: map[string]any{"room_id": roomID, "user_id": userID, "reason": reason}}
+}
+
+// roomKickedEvents builds one room.kicked per removed user, each addressed to that user only.
+func roomKickedEvents(roomID, reason string, users []string) []Event {
+	var events []Event
+	for _, u := range users {
+		events = append(events, Event{Type: EventRoomKicked, RoomID: roomID, To: []string{u},
+			Data: map[string]any{"room_id": roomID, "reason": reason}})
+	}
+	return events
+}
 
 // Event is a realtime notification for the users in To.
 type Event struct {

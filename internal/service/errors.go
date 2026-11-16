@@ -20,7 +20,24 @@ var (
 	ErrRoomLimit          = errors.New("room limit reached")
 	ErrAgeRestricted      = errors.New("age restricted")
 	ErrRoomNotFound       = errors.New("room not found")
+
+	ErrNotRoomOwner      = errors.New("not the room owner")
+	ErrOwnerCannotLeave  = errors.New("owner cannot leave own room")
+	ErrCannotRemoveOwner = errors.New("cannot remove the room owner")
 )
+
+// Reasons of a CodeIssueLimitError, in the order the checks run.
+const (
+	ReasonRoomFull      = "room_full"
+	ReasonEnoughUnused  = "enough_unused"
+	ReasonDailyLimit    = "daily_limit"
+	ReasonLifetimeLimit = "lifetime_limit"
+)
+
+// CodeIssueLimitError reports why the owner cannot issue another code.
+type CodeIssueLimitError struct{ Reason string }
+
+func (e *CodeIssueLimitError) Error() string { return "code issue limit: " + e.Reason }
 
 // AlreadyMemberError reports that the user already belongs to RoomID.
 type AlreadyMemberError struct{ RoomID string }
