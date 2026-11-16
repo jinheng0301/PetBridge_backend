@@ -152,8 +152,59 @@ func TestRemove_Idempotent(t *testing.T) {
 	if n := len(e.pub.all()); n != 0 {
 		t.Fatalf("idempotent removes published %d events", n)
 	}
-	if n := count(t, e.pool, `select count(*) from room_bans where room_id=$1`, room); n != 1 {
-		t.Fatalf("bans=%d, want 1 (a user who left is not banned)", n)
+	// The owner asked for both to be out and banned: someone who left just
+	// before the removal landed is banned too, so they cannot come back.
+	if n := count(t, e.pool, `select count(*) from room_bans where room_id=$1`, room); n != 2 {
+		t.Fatalf("bans=%d, want 2 (kicked and left-then-removed)", n)
+	}
+	if n := e.memberCount(t, room); n != 1 {
+		t.Fatalf("member_count=%d, idempotent removes must not vacate again", n)
+	}
+	if _, err := e.join(m[1], e.extraCode(t, owner)); !errors.Is(err, ErrCodeInvalid) {
+		t.Fatalf("left-then-removed user rejoined: err=%v want ErrCodeInvalid", err)
+	}
+}
+
+// Removing someone who never sat in the room is a no-op: no ban row, so an
+// owner cannot pre-ban arbitrary user ids.
+func TestRemove_NeverMemberNotBanned(t *testing.T) {
+	e := newJoinEnv(t)
+	owner := e.user(t, "o@x.test", "18_plus")
+	room := e.roomOf(t, owner)
+	stranger := e.user(t, "s@x.test", "18_plus")
+	if res, err := e.mgr.Remove(bg, owner, room, stranger); err != nil || res.MemberCount != 1 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if n := count(t, e.pool, `select count(*) from room_bans`); n != 0 {
+		t.Fatalf("bans=%d", n)
+	}
+	if n := len(e.pub.all()); n != 0 {
+		t.Fatalf("published %d events", n)
+	}
+}
+
+// A differently-cased target id still kicks the member, and every event
+// carries the canonical lower-case id so B4 can route it by user id.
+func TestRemove_UpperCaseTargetNormalized(t *testing.T) {
+	e := newJoinEnv(t)
+	owner := e.user(t, "o@x.test", "18_plus")
+	room := e.roomOf(t, owner)
+	m := e.fill(t, owner, 1)
+	e.pub.reset()
+
+	if _, err := e.mgr.Remove(bg, owner, room, strings.ToUpper(m[0])); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.eventTargets(EventRoomKicked); !slices.Equal(got, []string{m[0]}) {
+		t.Fatalf("room.kicked to %v want [%s]", got, m[0])
+	}
+	for _, ev := range e.pub.ofType(EventMemberLeft) {
+		if ev.Data["user_id"] != m[0] {
+			t.Fatalf("member.left user_id=%v want %s", ev.Data["user_id"], m[0])
+		}
+	}
+	if n := count(t, e.pool, `select count(*) from room_bans where room_id=$1 and user_id=$2`, room, m[0]); n != 1 {
+		t.Fatalf("ban rows=%d", n)
 	}
 }
 

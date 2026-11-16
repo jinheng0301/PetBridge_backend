@@ -104,8 +104,14 @@ func userIDs(members []model.MemberInfo) []string {
 }
 
 // Remove seats-out targetID as the owner of roomID and bans them from it.
-// A target who is not seated is a success without side effects.
+// A target who is no longer seated but once was (left, dissolved out, or a
+// leave that committed just before this removal) is still banned, without
+// events or seat changes: the owner asked for them to stay out. A target who
+// never sat in the room is a success without side effects.
 func (s *ManageService) Remove(ctx context.Context, ownerID, roomID, targetID string) (model.RoomSummary, error) {
+	// Canonical lower-case form, as ids come back from the database: events
+	// built below are routed by user id.
+	targetID = strings.ToLower(targetID)
 	var res model.RoomSummary
 	var events []Event
 	err := s.tx.WithTx(ctx, func(ctx context.Context) error {
@@ -114,7 +120,7 @@ func (s *ManageService) Remove(ctx context.Context, ownerID, roomID, targetID st
 		if err != nil {
 			return err
 		}
-		if strings.EqualFold(targetID, room.OwnerID) {
+		if targetID == room.OwnerID {
 			return ErrCannotRemoveOwner
 		}
 		left, err := s.members.Leave(ctx, room.ID, targetID, "kicked", s.now())
@@ -122,6 +128,15 @@ func (s *ManageService) Remove(ctx context.Context, ownerID, roomID, targetID st
 			return err
 		}
 		if !left {
+			ever, err := s.members.EverMember(ctx, room.ID, targetID)
+			if err != nil {
+				return err
+			}
+			if ever {
+				if err := s.bans.Ban(ctx, room.ID, targetID, ownerID); err != nil {
+					return err
+				}
+			}
 			res = summaryOf(room, room.MemberCount)
 			return nil
 		}

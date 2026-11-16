@@ -287,6 +287,10 @@ func TestConcurrent_LeaveVsRemoveSameMember(t *testing.T) {
 		if n := count(t, e.pool, `select count(*) from room_members where room_id=$1 and user_id=$2 and left_at is not null`, room, m); n != 1 {
 			t.Fatalf("round %d: %d ended rows for the member, want 1", round, n)
 		}
+		// Whichever commits first, the owner's removal must leave a ban.
+		if n := count(t, e.pool, `select count(*) from room_bans where room_id=$1 and user_id=$2`, room, m); n != 1 {
+			t.Fatalf("round %d: ban rows=%d, want 1 whether leave or remove won", round, n)
+		}
 	}
 }
 
