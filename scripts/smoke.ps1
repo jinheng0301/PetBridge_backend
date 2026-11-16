@@ -1,5 +1,5 @@
 # Smoke test: /healthz must return 200 and /readyz must report status ok, then (when dev login is
-# enabled) login -> onboarding -> GET /me. then (B3) a second user joins the first user's room.
+# enabled) login -> onboarding -> GET /me. then (B3) a second user joins the first user's room, then (B3b) leaves, and the owner issues a code and dissolves.
 $ErrorActionPreference = 'Stop'
 
 # Port: APP_PORT from the environment, else from .env, else 8080.
@@ -80,3 +80,32 @@ try {
     exit 1
 }
 
+
+# B3b flow: the second user leaves, then the first user (the owner) issues a code and dissolves.
+try {
+    $roomId = $ob.data.room.id
+    $leave = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/rooms/$roomId/leave" -Headers $headers2 -TimeoutSec 5
+    if ($leave.StatusCode -ne 204) {
+        Write-Host "FAIL leave: status $($leave.StatusCode), want 204"
+        exit 1
+    }
+    $mine2 = Invoke-RestMethod -Method Get -Uri "$base/rooms/mine" -Headers $headers2 -TimeoutSec 5
+    if (@($mine2.data).Count -ne 1) {
+        Write-Host "FAIL leave: /rooms/mine still lists $(@($mine2.data).Count) rooms, want 1"
+        exit 1
+    }
+    $regen = Invoke-RestMethod -Method Post -Uri "$base/rooms/$roomId/codes" -Headers $headers -TimeoutSec 5
+    if (-not $regen.data.code) {
+        Write-Host "FAIL regen: no code returned"
+        exit 1
+    }
+    $dissolve = Invoke-RestMethod -Method Post -Uri "$base/rooms/$roomId/dissolve" -Headers $headers -TimeoutSec 5
+    if ($dissolve.data.room.member_count -ne 1) {
+        Write-Host "FAIL dissolve: member_count is $($dissolve.data.room.member_count), want 1"
+        exit 1
+    }
+    Write-Host "OK leave -> regen -> dissolve ($email2 left, owner issued a code and dissolved)"
+} catch {
+    Write-Host "FAIL room management flow: $($_.Exception.Message)"
+    exit 1
+}

@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: PetBridge API
-  version: 0.3.0
+  version: 0.4.0
   description: >
-    B3a: health probes, authentication (dev login, Apple/Google stubs, refresh, logout),
-    onboarding, joining a room by invite code, listing my codes and my rooms.
-    Room management (remove, dissolve, leave, regenerate codes) arrives in B3b; messages from B4 onward.
+    B3: health probes, authentication (dev login, Apple/Google stubs, refresh, logout),
+    onboarding, joining a room by invite code, listing my codes and my rooms, and room management
+    (owner removes a member, dissolves the room or issues a code; members leave). Messages from B4 onward.
     Every business path lives under /api/v1; probes do not.
     Success bodies are {"data": ...}; failures are {"error": {code, message, request_id, details?}}.
     Login routes are limited to 10 requests per minute per client IP (429 RATE_LIMITED with Retry-After).
@@ -259,6 +259,115 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
         '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/rooms/{id}/members/{user_id}:
+    delete:
+      tags: [rooms]
+      summary: Owner removes a member
+      description: >
+        Owner only. The removed member is banned from the room: any later code for it is CODE_INVALID.
+        A full room reopens; codes voided when it filled stay void. Removing someone who is no longer
+        seated succeeds with no change (so does a `user_id` that is not a user id). Removing the owner
+        is 400 VALIDATION_FAILED. A caller who is seated but not the owner gets 403 NOT_ROOM_OWNER;
+        anyone else, or an unknown room, gets 404 ROOM_NOT_FOUND.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The room after the removal
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/RoomResult' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotRoomOwner' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/rooms/{id}/dissolve:
+    post:
+      tags: [rooms]
+      summary: Owner dissolves the room
+      description: >
+        Owner only. Every other member is moved out (nobody is banned, so they may join again with a new
+        code) and the room's unused codes are voided. The room is left open with only the owner.
+        Repeating the call succeeds with no change.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The room after dissolving
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/RoomResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotRoomOwner' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/rooms/{id}/codes:
+    post:
+      tags: [rooms]
+      summary: Owner issues one more invite code
+      description: >
+        Owner only. Refused with 409 CODE_ISSUE_LIMIT when the room is not open
+        (`details.reason` room_full), the room already has as many valid unused codes as free seats
+        (enough_unused), the owner already issued the daily limit of such codes today in their own
+        time zone (daily_limit), or the owner reached the lifetime cap of codes (lifetime_limit).
+        Checked in that order; the first that applies is reported.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '201':
+          description: The new code
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/CodeInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotRoomOwner' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '409':
+          description: CODE_ISSUE_LIMIT with `error.details.reason`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/rooms/{id}/leave:
+    post:
+      tags: [rooms]
+      summary: Leave a room I joined
+      description: >
+        For rooms owned by someone else. The owner calling it gets 409 OWNER_CANNOT_LEAVE (dissolve
+        instead). Anyone who was ever seated in the room and no longer is (left, removed or dissolved
+        out) gets the same 204, so a removed member cannot tell removal from leaving; someone who never
+        was seated there, or an unknown room, gets 404 ROOM_NOT_FOUND. Leaving is not a ban: a new code
+        works, but the join reward is paid once per room.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Left (or already gone) }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '409':
+          description: OWNER_CANNOT_LEAVE
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/Internal' }
   /api/v1/codes:
     get:
       tags: [codes]
@@ -341,6 +450,18 @@ components:
       description: >
         ROOM_FULL, ROOM_LIMIT (already in 2 rooms, own room included) or ALREADY_MEMBER
         (error.details.room_id names the room). The code is not consumed.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotRoomOwner:
+      description: NOT_ROOM_OWNER. The caller is seated in the room but does not own it.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RoomNotFound:
+      description: >
+        ROOM_NOT_FOUND. The room does not exist or the caller has no seat in it; the two are
+        deliberately not told apart.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -513,6 +634,11 @@ components:
           type: array
           description: Reward codes for the caller's own room; [] when none (never null).
           items: { $ref: '#/components/schemas/CodeInfo' }
+    RoomResult:
+      type: object
+      required: [room]
+      properties:
+        room: { $ref: '#/components/schemas/RoomSummary' }
     RoomDetail:
       type: object
       required: [id, is_owner, status, member_count, capacity, members]

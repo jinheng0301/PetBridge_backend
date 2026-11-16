@@ -665,7 +665,7 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 
 任一条件不满足返回 `CODE_ISSUE_LIMIT`，`error.details.reason` 取 `room_full` / `enough_unused` / `daily_limit` / `lifetime_limit`，前端据此展示不同文案。
 
-**成员退出** `POST /rooms/{id}/leave`：仅限“所加入的他人小屋”。房主对自己的小屋调用返回 `OWNER_CANNOT_LEAVE`（应使用解散）。事务内置 `left_reason='left'`、`member_count - 1`、满员则恢复 `open`；不拉黑，已作废的码不恢复。
+**成员退出** `POST /rooms/{id}/leave`：仅限“所加入的他人小屋”。房主对自己的小屋调用返回 `OWNER_CANNOT_LEAVE`（应使用解散）。事务内置 `left_reason='left'`、`member_count - 1`、满员则恢复 `open`；不拉黑，已作废的码不恢复。**幂等规则（B3b 定稿）**：曾经在席、现已不在席的人（主动退出、被移除、被解散）再次调用一律返回成功（204），所以被移除者与主动退出者看到的结果完全一致，不会暴露"被移除"；从没进过该房间的人，或房间不存在，返回 `ROOM_NOT_FOUND`。房主类操作（移除、解散、补码）对在席的非房主返回 `NOT_ROOM_OWNER`，对其他人返回 `ROOM_NOT_FOUND`。入房、移除、解散、补码、退出的事务遇到死锁或序列化失败（`40P01`/`40001`）时整体重试一次。
 
 **测试要求**：踢人与入房并发（最后一个席位）不超员；dissolve 与 join 并发不死锁；补码并发不超过“空位数”和每日上限；被移除者用同房间新码入房一律得到 CODE_INVALID。
 
@@ -695,6 +695,20 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 |  | POST /deliveries/{id}/polish；POST /deliveries/{id}/read | 接收方润色、已读 |
 | 小屋 | POST /rooms/{id}/checkin；GET /rooms/{id}/decor | 打卡与装扮 |
 | 配置 | GET /config/phrases?v= | 常用短语多语言模板，带版本号，客户端缓存 |
+
+**B3 新增错误码与 HTTP 状态**（`error.details` 里的字段见括号）：
+
+| code | HTTP | 说明 |
+| :-- | :-- | :-- |
+| ONBOARDING_REQUIRED | 403 | 未完成 onboarding |
+| CODE_INVALID | 404 | 对外不区分原因，计入输错冷却 |
+| ROOM_FULL / ALREADY_MEMBER（`room_id`） / ROOM_LIMIT | 409 | 不消耗码 |
+| AGE_RESTRICTED | 403 | 成年人与未成年人不同房 |
+| CODE_COOLDOWN（`retry_after_seconds`） / RATE_LIMITED（`Retry-After` 头） | 429 | |
+| NOT_ROOM_OWNER | 403 | 在席但不是房主 |
+| ROOM_NOT_FOUND | 404 | 房间不存在，或调用者在该房间没有座位（不区分） |
+| OWNER_CANNOT_LEAVE | 409 | 房主应使用解散 |
+| CODE_ISSUE_LIMIT（`reason`：`room_full` / `enough_unused` / `daily_limit` / `lifetime_limit`） | 409 | |
 | 安全 | POST /reports；POST /blocks；DELETE /blocks/{user\_id} | 举报与屏蔽 |
 | 设备 | PUT /devices/current | 登记推送 token、语言、时区 |
 | Widget | GET /widget/snapshot | 见 7.6 |
