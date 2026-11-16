@@ -265,8 +265,11 @@ paths:
       summary: Owner removes a member
       description: >
         Owner only. The removed member is banned from the room: any later code for it is CODE_INVALID.
-        A full room reopens; codes voided when it filled stay void. Removing someone who is no longer
-        seated succeeds with no change (so does a `user_id` that is not a user id). Removing the owner
+        A full room reopens; codes voided when it filled stay void. Removing someone who was seated
+        but no longer is (left or dissolved out, including a leave that landed just before) succeeds,
+        changes no seat and sends no event, but still bans them. Removing someone who never sat in the
+        room, or a `user_id` that is not a user id, succeeds with no change at all. Ids are compared
+        case-insensitively. Removing the owner
         is 400 VALIDATION_FAILED. A caller who is seated but not the owner gets 403 NOT_ROOM_OWNER;
         anyone else, or an unknown room, gets 404 ROOM_NOT_FOUND.
       security: [{ bearerAuth: [] }]

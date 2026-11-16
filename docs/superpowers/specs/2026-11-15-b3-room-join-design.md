@@ -142,7 +142,7 @@
 
 全部遵守 7.8 的流程与锁顺序，操作各自一个事务，先锁房间行。
 
-- **移除** `DELETE /rooms/{id}/members/{user_id}`：成功返回 200 `{ room }`；目标已不在席视为成功（幂等）；目标是房主本人 → `VALIDATION_FAILED`；原为 `full` 则恢复 `open`；写 `room_bans`。
+- **移除** `DELETE /rooms/{id}/members/{user_id}`：成功返回 200 `{ room }`；目标已不在席视为成功（幂等）：曾经在席的（主动退出、被解散，含与移除并发、退出先提交的情况）照样写 `room_bans`，但不改人数、不发事件，否则成员抢先一步退出就能躲过拉黑；从没进过该房间的人不写任何东西；`user_id` 不区分大小写，事件里一律用小写 id；目标是房主本人 → `VALIDATION_FAILED`；原为 `full` 则恢复 `open`；写 `room_bans`。
 - **解散** `POST /rooms/{id}/dissolve`：先作废 unused 码，再移出成员，再改房间；不拉黑；成功返回 200 `{ room }`。**TRD 17 章把"房主解散"排在 B6，我提前到 B3b**：7.8 的测试要求里有"dissolve 与 join 并发不死锁"，这是验证锁顺序的关键用例，而且它和移除共用大部分代码。【我的决定，见第 9 节】
 - **补码** `POST /rooms/{id}/codes`：条件与 `details.reason` 取值以 TRD 7.8 为准（`room_full` / `enough_unused` / `daily_limit` / `lifetime_limit`）；"今日"按房主 `users.tz` 的本地日界限计算；成功返回 201 `{ code, expires_at }`。
 - **退出** `POST /rooms/{id}/leave`：成功 204；房主调用 → `OWNER_CANNOT_LEAVE`；曾经在席、现已不在席的人（主动退出、被移除、被解散）一律视为成功（204，被移除者与主动退出者看到的结果完全一致）；从没进过该房间 → `ROOM_NOT_FOUND`。
@@ -248,6 +248,7 @@
 16. `leave` 对曾经在席的人幂等返回 204，从没进过的人 `ROOM_NOT_FOUND`（5.6，B3b）
 17. 解散先 Peek 校验房主、再锁 unused 码、再锁房间，非房主不锁码（5.6，B3b）
 18. 死锁/序列化失败由 `RetryTx` 重试一次，入房一并受益（5.1，B3b）
+19. 移除对"曾经在席、已不在席"的人仍然拉黑，堵住"退出抢在移除前提交就不被拉黑"的竞态；从没进过的人不拉黑，防止房主预先拉黑任意 id（5.6，B3b 审查后修订）
 
 ## 10. 留给实现者
 

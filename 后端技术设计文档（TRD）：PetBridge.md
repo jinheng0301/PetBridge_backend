@@ -628,7 +628,8 @@ ALTER TABLE room_bans ADD CONSTRAINT pk_room_ban PRIMARY KEY (room_id, user_id);
 1. 校验：调用者是房主；目标在席且不是房主本人（房主不能移除自己）
 2. UPDATE room_members SET left_at=now(), left_reason='kicked'
       WHERE room_id=$r AND user_id=$u AND left_at IS NULL
-      → 0 行：目标已不在房内，按幂等视为成功，直接返回
+      → 0 行：目标已不在房内，按幂等视为成功：曾经在席（退出、被解散，含刚好抢先一步退出）的仍写 room_bans，
+        不改人数、不发事件；从没进过的人不写任何东西，直接返回
 3. INSERT room_bans ON CONFLICT DO NOTHING
 4. UPDATE rooms SET member_count = member_count - 1, status = 'open' WHERE id=$r
       （原为 full 则恢复 open；此前因满员而作废的码保持 void，不恢复）
