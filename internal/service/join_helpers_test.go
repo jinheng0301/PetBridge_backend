@@ -87,6 +87,12 @@ func (p *recordingPublisher) Publish(ctx context.Context, e Event) {
 	}
 }
 
+func (p *recordingPublisher) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.events, p.deadCalls = nil, 0
+}
+
 func (p *recordingPublisher) all() []Event {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -139,6 +145,9 @@ type joinEnv struct {
 	users *UserService
 	guard *fakeGuard
 	pub   *recordingPublisher
+	txm   *repository.TxManager
+	mgr   *ManageService
+	seq   int
 }
 
 func defaultJoinConfig() JoinConfig {
@@ -163,6 +172,9 @@ func newJoinEnvCfg(t *testing.T, cfg JoinConfig) *joinEnv {
 	e.users = NewUserService(userRepo, rooms, members, codes, txm, cfg.CodeTTLDays, clock)
 	e.svc = NewJoinService(userRepo, rooms, members, codes, repository.NewBanRepo(pool), repository.NewRewardRepo(pool),
 		txm, e.guard, e.pub, cfg, clock)
+	e.txm = txm
+	e.mgr = NewManageService(userRepo, rooms, members, codes, repository.NewBanRepo(pool), txm, e.pub,
+		ManageConfig{CodeTTLDays: cfg.CodeTTLDays, RegenDailyLimit: 3, LifetimeCap: cfg.RewardLifetimeCap}, clock)
 	return e
 }
 

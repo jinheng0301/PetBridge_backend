@@ -65,6 +65,19 @@ func classify(err error, allowed ...error) error {
 // slots. It returns the service and the pool size actually used.
 func (e *joinEnv) concurrentService(t *testing.T, want int) (*JoinService, int) {
 	t.Helper()
+	pool, size := e.concurrentPool(t, want)
+	clock := func() time.Time { return e.now }
+	svc := NewJoinService(repository.NewUserRepo(pool), repository.NewRoomRepo(pool), repository.NewRoomMemberRepo(pool),
+		repository.NewInviteCodeRepo(pool), repository.NewBanRepo(pool), repository.NewRewardRepo(pool),
+		repository.NewTxManager(pool), e.guard, e.pub, defaultJoinConfig(), clock)
+	return svc, size
+}
+
+// concurrentPool opens a pool large enough to run up to want transactions at
+// once, capped by the server's free connection slots, with every connection
+// dialed up front. It returns the pool and its size.
+func (e *joinEnv) concurrentPool(t *testing.T, want int) (*pgxpool.Pool, int) {
+	t.Helper()
 	maxConns := count(t, e.pool, `select setting::int from pg_settings where name='max_connections'`)
 	inUse := count(t, e.pool, `select count(*) from pg_stat_activity`)
 	size := min(want, maxConns-inUse-10) // leave room for superuser slots and e.pool growth
@@ -91,11 +104,7 @@ func (e *joinEnv) concurrentService(t *testing.T, want int) (*JoinService, int) 
 	for _, c := range conns {
 		c.Release()
 	}
-	clock := func() time.Time { return e.now }
-	svc := NewJoinService(repository.NewUserRepo(pool), repository.NewRoomRepo(pool), repository.NewRoomMemberRepo(pool),
-		repository.NewInviteCodeRepo(pool), repository.NewBanRepo(pool), repository.NewRewardRepo(pool),
-		repository.NewTxManager(pool), e.guard, e.pub, defaultJoinConfig(), clock)
-	return svc, int(cfg.MaxConns)
+	return pool, int(cfg.MaxConns)
 }
 
 func (e *joinEnv) activeRooms(t *testing.T, userID string) int {
