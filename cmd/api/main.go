@@ -18,6 +18,7 @@ import (
 	"github.com/jinheng0301/petbridge/internal/platform/db"
 	"github.com/jinheng0301/petbridge/internal/platform/logger"
 	"github.com/jinheng0301/petbridge/internal/platform/ratelimit"
+	"github.com/jinheng0301/petbridge/internal/platform/realtime"
 	pbredis "github.com/jinheng0301/petbridge/internal/platform/redis"
 	"github.com/jinheng0301/petbridge/internal/repository"
 	"github.com/jinheng0301/petbridge/internal/server"
@@ -82,12 +83,23 @@ func main() {
 
 	// Rate limits live in Redis and fall back to in-process counters while it is down.
 	counter := ratelimit.NewFallback(ratelimit.NewRedis(rdb), ratelimit.NewMemory(time.Now),
-		newFallbackLogger(log, 30*time.Second, time.Now))
+		newFallbackLogger(log, "redis unavailable, rate limits use in-process counters", 30*time.Second, time.Now))
+
+	// Realtime: room seqs and ws:events in Redis; while Redis is down, events
+	// are delivered by this node's hub directly (backend TRD 7.3).
+	rtCfg := service.DefaultRealtimeConfig(cfg.MinAppVersion)
+	hub := service.NewHub(rtCfg)
+	pub := service.NewEventPublisher(realtime.NewBus(rdb, "ws:events", ""), hub,
+		newFallbackLogger(log, "redis unavailable, realtime events delivered locally", 30*time.Second, time.Now))
+	presence := service.NewPresenceService(realtime.NewPresenceStore(rdb, "", rtCfg.PresenceTTL), hub, rooms, pub, rtCfg, time.Now)
+	pub.SetPresence(presence)
+	pub.SetLogger(log)
+	go pub.Run(ctx)
 	// A deadlock or serialization failure rolls the transaction back whole; run it once more.
 	retryTx := service.RetryTx{Inner: tx, Retryable: repository.IsRetryableTxError}
 	bans := repository.NewBanRepo(pool)
 	joinSvc := service.NewJoinService(users, rooms, members, codes, bans,
-		repository.NewRewardRepo(pool), retryTx, ratelimit.NewJoinGuard(counter), service.NopPublisher{},
+		repository.NewRewardRepo(pool), retryTx, ratelimit.NewJoinGuard(counter), pub,
 		service.JoinConfig{
 			CodeTTLDays:       cfg.CodeTTLDays,
 			RewardCount:       cfg.RewardCodeCount,
@@ -102,7 +114,7 @@ func main() {
 	authHandler := handler.NewAuthHandler(authSvc, cfg.DevLoginEnabled, idtoken.NotConfiguredVerifier{}, googleVerifier).
 		WithLoginLimit(middleware.RateLimitIP(counter, "login", 10, time.Minute))
 	userHandler := handler.NewUserHandler(userSvc, authn)
-	manageSvc := service.NewManageService(users, rooms, members, codes, bans, retryTx, service.NopPublisher{},
+	manageSvc := service.NewManageService(users, rooms, members, codes, bans, retryTx, pub,
 		service.ManageConfig{
 			CodeTTLDays:     cfg.CodeTTLDays,
 			RegenDailyLimit: cfg.OwnerRegenDailyLimit,
@@ -110,10 +122,17 @@ func main() {
 		}, time.Now)
 	roomHandler := handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn).WithManage(manageSvc)
 	codeHandler := handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn)
-	router := server.NewRouter(log, health, authHandler, userHandler, roomHandler, codeHandler)
+	// Upgrades are limited per IP (generous: carrier NAT shares IPs) and per
+	// user; the socket itself closes when the access token expires.
+	wsHandler := handler.NewWsHandler(hub, presence, service.NewRealtimeService(rooms, members, presence, pub, pub),
+		users, issuer, rtCfg, authn).
+		WithUpgradeLimit(middleware.RateLimitIP(counter, "ws", 60, time.Minute),
+			middleware.RateLimitUser(counter, "ws", 20, time.Minute)).
+		WithLogger(log)
+	router := server.NewRouter(log, health, authHandler, userHandler, roomHandler, codeHandler, wsHandler)
 
 	log.Info("starting api", "app_env", cfg.AppEnv, "port", cfg.AppPort)
-	if err := server.Run(ctx, net.JoinHostPort(cfg.AppHost, strconv.Itoa(cfg.AppPort)), router, log); err != nil {
+	if err := server.Run(ctx, net.JoinHostPort(cfg.AppHost, strconv.Itoa(cfg.AppPort)), router, log, func() { wsHandler.Shutdown(5 * time.Second) }); err != nil {
 		log.Error("server stopped", "error", err.Error())
 		os.Exit(1)
 	}

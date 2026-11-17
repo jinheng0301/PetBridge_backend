@@ -17,7 +17,7 @@ import (
 func TestFallbackLogger_ThrottlesWarnings(t *testing.T) {
 	buf := &bytes.Buffer{}
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
-	onFallback := newFallbackLogger(logger.New("debug", buf), 30*time.Second, func() time.Time { return now })
+	onFallback := newFallbackLogger(logger.New("debug", buf), "redis unavailable, rate limits use in-process counters", 30*time.Second, func() time.Time { return now })
 	down := errors.New("dial tcp: connection refused")
 
 	onFallback(down)
@@ -66,7 +66,7 @@ func TestFallbackLogging_CallerCancellationVersusDialTimeout(t *testing.T) {
 	}
 	buf := &bytes.Buffer{}
 	counter := ratelimit.NewFallback(dialTimeoutCounter{}, ratelimit.NewMemory(time.Now),
-		newFallbackLogger(logger.New("debug", buf), 30*time.Second, time.Now))
+		newFallbackLogger(logger.New("debug", buf), "redis unavailable, rate limits use in-process counters", 30*time.Second, time.Now))
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -89,5 +89,13 @@ func TestFallbackLogging_CallerCancellationVersusDialTimeout(t *testing.T) {
 	}
 	if strings.Count(buf.String(), "\n") != 1 || !strings.Contains(buf.String(), "i/o timeout") {
 		t.Fatalf("dial timeout with a live request not logged:\n%s", buf.String())
+	}
+}
+
+func TestFallbackLogger_UsesGivenMessage(t *testing.T) {
+	buf := &bytes.Buffer{}
+	newFallbackLogger(logger.New("debug", buf), "redis unavailable, realtime events delivered locally", time.Minute, time.Now)(errors.New("down"))
+	if !strings.Contains(buf.String(), `"msg":"redis unavailable, realtime events delivered locally"`) {
+		t.Fatalf("log: %s", buf.String())
 	}
 }

@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 )
+
+// versionRE matches a plain MAJOR.MINOR.PATCH app version.
+var versionRE = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 type Config struct {
 	AppEnv                string
@@ -30,6 +34,7 @@ type Config struct {
 	OwnerRegenDailyLimit  int // owner code regenerations allowed per day
 	AIProvider            string
 	GoogleClientID        string // OAuth Web client ID; empty keeps Google login not configured
+	MinAppVersion         string // sent in the WebSocket hello as min_app_version
 }
 
 // ValidationError lists every configuration problem found. Problems contain
@@ -130,6 +135,11 @@ func Load(getenv func(string) string) (*Config, error) {
 		add("OWNER_REGEN_DAILY_LIMIT must be an integer of at least 1")
 	}
 	c.OwnerRegenDailyLimit = regenLimit
+
+	c.MinAppVersion = get("MIN_APP_VERSION", "0.0.0")
+	if !versionRE.MatchString(c.MinAppVersion) {
+		add("MIN_APP_VERSION must be a version such as 1.2.0")
+	}
 
 	dev, err := strconv.ParseBool(get("DEV_LOGIN_ENABLED", "false"))
 	if err != nil {

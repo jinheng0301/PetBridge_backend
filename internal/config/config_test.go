@@ -289,3 +289,24 @@ func TestLoad_GoogleClientID(t *testing.T) {
 		t.Fatalf("GoogleClientID = %q", c.GoogleClientID)
 	}
 }
+
+func TestLoad_MinAppVersion(t *testing.T) {
+	c, err := Load(env(required()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MinAppVersion != "0.0.0" {
+		t.Fatalf("MinAppVersion default = %q, want 0.0.0", c.MinAppVersion)
+	}
+	c, err = Load(env(with(required(), "MIN_APP_VERSION", "1.4.2")))
+	if err != nil || c.MinAppVersion != "1.4.2" {
+		t.Fatalf("MinAppVersion = %q, err=%v", c.MinAppVersion, err)
+	}
+	for _, bad := range []string{"abc", "1.2", "1.2.3-beta", "v1.2.3"} {
+		_, err = Load(env(with(required(), "MIN_APP_VERSION", bad)))
+		var ve *ValidationError
+		if !errors.As(err, &ve) || !strings.Contains(err.Error(), "MIN_APP_VERSION must be a version such as 1.2.0") {
+			t.Fatalf("MIN_APP_VERSION=%q: err=%v", bad, err)
+		}
+	}
+}

@@ -53,7 +53,7 @@ func TestRun_GracefulShutdown(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
-	go func() { runErr <- Run(ctx, addr, slow, logger.New("debug", quietLogger())) }()
+	go func() { runErr <- Run(ctx, addr, slow, logger.New("debug", quietLogger()), nil) }()
 
 	// wait until the server accepts connections
 	for i := 0; i < 50; i++ {
@@ -103,7 +103,7 @@ func TestRun_PortInUse_ReturnsError(t *testing.T) {
 	defer l.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(context.Background(), l.Addr().String(), http.NewServeMux(), logger.New("debug", quietLogger()))
+		done <- Run(context.Background(), l.Addr().String(), http.NewServeMux(), logger.New("debug", quietLogger()), nil)
 	}()
 	select {
 	case err := <-done:
@@ -112,5 +112,41 @@ func TestRun_PortInUse_ReturnsError(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run blocked on an occupied port")
+	}
+}
+
+func TestRun_BeforeShutdownCalledFirst(t *testing.T) {
+	addr := freeAddr(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "up") })
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan bool, 1)
+	before := func() {
+		resp, err := http.Get("http://" + addr + "/")
+		if err == nil {
+			resp.Body.Close()
+		}
+		served <- err == nil && resp.StatusCode == 200
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- Run(ctx, addr, mux, logger.New("debug", quietLogger()), before) }()
+	for i := 0; i < 50; i++ {
+		if c, err := net.Dial("tcp", addr); err == nil {
+			c.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case ok := <-served:
+		if !ok {
+			t.Fatal("beforeShutdown ran after the server stopped serving")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("beforeShutdown not called")
+	}
+	if err := <-runErr; err != nil {
+		t.Fatal(err)
 	}
 }

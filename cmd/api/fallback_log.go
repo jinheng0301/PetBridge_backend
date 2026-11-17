@@ -6,13 +6,14 @@ import (
 	"time"
 )
 
-// newFallbackLogger returns the onFallback callback for ratelimit.Fallback.
-// The callback fires on every rate-limit call while Redis is down, so it logs
-// at most one warning per interval and reports how many it suppressed.
+// newFallbackLogger returns an onFallback callback (ratelimit.Fallback,
+// service.EventPublisher) that logs msg. The callback fires on every call
+// while Redis is down, so it logs at most one warning per interval and
+// reports how many it suppressed.
 // It does not filter by error type: a dial timeout to an unreachable Redis
 // satisfies errors.Is(err, context.DeadlineExceeded) too. Fallback itself
 // skips the callback when the caller's own request context has ended.
-func newFallbackLogger(log *slog.Logger, interval time.Duration, now func() time.Time) func(error) {
+func newFallbackLogger(log *slog.Logger, msg string, interval time.Duration, now func() time.Time) func(error) {
 	var (
 		mu         sync.Mutex
 		last       time.Time
@@ -29,7 +30,6 @@ func newFallbackLogger(log *slog.Logger, interval time.Duration, now func() time
 		n := suppressed
 		last, suppressed = t, 0
 		mu.Unlock()
-		log.Warn("redis unavailable, rate limits use in-process counters",
-			"error", err.Error(), "suppressed", n)
+		log.Warn(msg, "error", err.Error(), "suppressed", n)
 	}
 }
