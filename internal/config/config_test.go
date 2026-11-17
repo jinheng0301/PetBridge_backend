@@ -272,3 +272,20 @@ func TestLoad_RewardCountZeroAllowed(t *testing.T) {
 		t.Fatalf("RewardCodeCount = %d, want 0", c.RewardCodeCount)
 	}
 }
+
+func TestLoad_GoogleClientID(t *testing.T) {
+	c, err := Load(env(required()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.GoogleClientID != "" {
+		t.Fatalf("GoogleClientID default = %q, want empty", c.GoogleClientID)
+	}
+	c, err = Load(env(with(required(), "GOOGLE_CLIENT_ID", "  web-123.apps.googleusercontent.com ")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.GoogleClientID != "web-123.apps.googleusercontent.com" {
+		t.Fatalf("GoogleClientID = %q", c.GoogleClientID)
+	}
+}
