@@ -580,10 +580,10 @@ components:
       properties:
         id: { type: string, format: uuid }
         nickname: { type: string, nullable: true }
-        native_lang: { type: string, nullable: true, enum: [ja, ko, zh-Hant, zh-Hans, en] }
+        native_lang: { type: string, nullable: true, enum: [ja, ko, zh-Hant, zh-Hans, en, null] }
         mbti: { type: string, nullable: true, example: ENFP }
         pet_type: { type: string, nullable: true, example: happy_shiba }
-        age_band: { type: string, nullable: true, enum: [13_17, 18_plus] }
+        age_band: { type: string, nullable: true, enum: [13_17, 18_plus, null] }
         tz: { type: string, nullable: true, example: Asia/Tokyo }
         onboarded: { type: boolean }
     OnboardingRequest:
