@@ -410,6 +410,32 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
         '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/ws:
+    get:
+      operationId: openWebSocket
+      tags: [realtime]
+      summary: Realtime WebSocket
+      description: >
+        Upgrades to a WebSocket carrying room events (member joins and leaves, presence, pet taps).
+        Send the access token in the Authorization header, never in the URL. The connection is
+        closed with code 4401 when that access token expires; refresh it and reconnect at once.
+        Upgrades are limited per IP and per user (429). Frames are JSON
+        `{t, id?, seq?, d}`; the frame types, which ones carry a room seq, the error frame and the
+        close codes are specified in backend TRD chapter 9. Every room.sub answers with a full
+        room.snapshot.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '101':
+          description: Switching to the WebSocket protocol; the first frame is hello.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/Internal' }
+        '503':
+          description: NOT_READY, the server is restarting; reconnect after a random 1-10 s wait.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 components:
   securitySchemes:
     bearerAuth:
