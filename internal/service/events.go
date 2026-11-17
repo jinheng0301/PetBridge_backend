@@ -12,12 +12,26 @@ const (
 	EventCodeInvalidated = "code.invalidated"
 	EventMemberLeft      = "member.left"
 	EventRoomKicked      = "room.kicked"
+	EventPresenceUpdate  = "presence.update"
+	EventPetAction       = "pet.action"
+)
+
+// EventKind decides how an event is numbered and routed.
+type EventKind int
+
+const (
+	// KindState changes room state for every seated member; it gets a room seq.
+	KindState EventKind = iota
+	// KindTransient is room-scoped but carries no state the snapshot misses (presence, pet actions); no seq.
+	KindTransient
+	// KindPersonal is addressed to individual users whether or not they subscribed the room; no seq.
+	KindPersonal
 )
 
 // memberLeftEvent tells the remaining members that userID left, was kicked or
 // was dissolved out (reason left|kicked|dissolved).
 func memberLeftEvent(roomID, userID, reason string, to []string) Event {
-	return Event{Type: EventMemberLeft, RoomID: roomID, To: to,
+	return Event{Type: EventMemberLeft, Kind: KindState, RoomID: roomID, To: to,
 		Data: map[string]any{"room_id": roomID, "user_id": userID, "reason": reason}}
 }
 
@@ -25,7 +39,7 @@ func memberLeftEvent(roomID, userID, reason string, to []string) Event {
 func roomKickedEvents(roomID, reason string, users []string) []Event {
 	var events []Event
 	for _, u := range users {
-		events = append(events, Event{Type: EventRoomKicked, RoomID: roomID, To: []string{u},
+		events = append(events, Event{Type: EventRoomKicked, Kind: KindPersonal, RoomID: roomID, To: []string{u},
 			Data: map[string]any{"room_id": roomID, "reason": reason}})
 	}
 	return events
@@ -34,6 +48,7 @@ func roomKickedEvents(roomID, reason string, users []string) []Event {
 // Event is a realtime notification for the users in To.
 type Event struct {
 	Type   string
+	Kind   EventKind
 	RoomID string
 	To     []string
 	Data   map[string]any
@@ -59,11 +74,11 @@ func joinEvents(roomID, userID string, members []model.MemberInfo, holders []str
 	}
 	var events []Event
 	if len(others) > 0 {
-		events = append(events, Event{Type: EventMemberJoined, RoomID: roomID, To: others,
+		events = append(events, Event{Type: EventMemberJoined, Kind: KindState, RoomID: roomID, To: others,
 			Data: map[string]any{"room_id": roomID, "member": me}})
 	}
 	if len(holders) > 0 {
-		events = append(events, Event{Type: EventCodeInvalidated, RoomID: roomID, To: holders,
+		events = append(events, Event{Type: EventCodeInvalidated, Kind: KindPersonal, RoomID: roomID, To: holders,
 			Data: map[string]any{"room_id": roomID, "reason": "room_full"}})
 	}
 	return events
