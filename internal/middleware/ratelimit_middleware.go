@@ -18,17 +18,29 @@ import (
 // recorded with c.Error: limiting is best effort and must not take login down.
 func RateLimitIP(c ratelimit.Counter, name string, limit int, window time.Duration) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		hit, err := c.Incr(ctx.Request.Context(), "rl:"+name+":ip:"+ctx.ClientIP(), window)
-		if err != nil {
-			_ = ctx.Error(err)
-			ctx.Next()
-			return
-		}
-		if hit.Count > int64(limit) {
-			ctx.Header("Retry-After", strconv.Itoa(handler.RetrySeconds(hit.Resets)))
-			handler.Fail(ctx, http.StatusTooManyRequests, model.CodeRateLimited, "too many requests")
-			return
-		}
-		ctx.Next()
+		limitKey(ctx, c, "rl:"+name+":ip:"+ctx.ClientIP(), limit, window)
 	}
+}
+
+// RateLimitUser is RateLimitIP keyed by the authenticated user
+// (rl:{name}:u:{id}); it must run after Auth.
+func RateLimitUser(c ratelimit.Counter, name string, limit int, window time.Duration) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		limitKey(ctx, c, "rl:"+name+":u:"+handler.UserID(ctx), limit, window)
+	}
+}
+
+func limitKey(ctx *gin.Context, c ratelimit.Counter, key string, limit int, window time.Duration) {
+	hit, err := c.Incr(ctx.Request.Context(), key, window)
+	if err != nil {
+		_ = ctx.Error(err)
+		ctx.Next()
+		return
+	}
+	if hit.Count > int64(limit) {
+		ctx.Header("Retry-After", strconv.Itoa(handler.RetrySeconds(hit.Resets)))
+		handler.Fail(ctx, http.StatusTooManyRequests, model.CodeRateLimited, "too many requests")
+		return
+	}
+	ctx.Next()
 }

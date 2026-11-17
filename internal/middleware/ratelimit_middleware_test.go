@@ -81,3 +81,36 @@ func TestRateLimitIP_FailsOpenOnCounterError(t *testing.T) {
 		}
 	}
 }
+
+func TestRateLimitUser_PerUser(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	c := ratelimit.NewMemory(time.Now)
+	r.GET("/ws", func(ctx *gin.Context) {
+		ctx.Set(model.CtxUserID, ctx.GetHeader("X-User"))
+		ctx.Next()
+	}, RateLimitUser(c, "ws", 2, time.Minute), func(ctx *gin.Context) { ctx.Status(http.StatusOK) })
+	get := func(user string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+		req.Header.Set("X-User", user)
+		r.ServeHTTP(w, req)
+		return w
+	}
+	for i := 0; i < 2; i++ {
+		if w := get("u1"); w.Code != 200 {
+			t.Fatalf("request %d: %d", i+1, w.Code)
+		}
+	}
+	w := get("u1")
+	var body struct {
+		Error struct{ Code string } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != http.StatusTooManyRequests || body.Error.Code != model.CodeRateLimited || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("third request: %d %s", w.Code, w.Body.String())
+	}
+	if w := get("u2"); w.Code != 200 {
+		t.Fatalf("another user must have its own budget, got %d", w.Code)
+	}
+}
