@@ -168,6 +168,13 @@ service ──Publish(event)──► EventPublisher
 - `cmd/api/main.go`：装配，替换 `NopPublisher`，关闭顺序
 - `internal/service/room_manage_service.go`：5.8 的两处事件
 
+### 5.11 安全加固（v1.5，实现后安全审查追加，用户已同意）
+
+安全审查与代码审查后追加，对应后端 TRD v1.5：
+- **连接不再比 token 活得久**：服务端在升级所用 access token 到期时以关闭码 4401 断开，客户端刷新后立即重连。取代 5.1 的“只在升级时校验、过期不断开”。登出、封号最迟在 access token 到期（15 分钟）时对 WS 生效，与 REST 一致。原先设想的“登出时断开该用户所有连接”没有做：登出只吊销当前设备的刷新令牌，按用户断开会把其他设备也踢掉，而 token 到期断开已经给出了同样的上限【我的决定】。
+- **限流**：升级按 IP 每分钟 60 次、按用户每分钟 20 次（429）；`room.sub` 每连接每 10 秒 10 次（`error{RATE_LIMITED}`）；非 UUID 的 `room_id` 不查库直接 `ROOM_NOT_FOUND`。
+- **其余**：重启开始后新升级返回 503 `NOT_READY`（也消除了 Shutdown 等待与新连接并发时 `WaitGroup` 的 panic）；`hello` 保证第一帧；订阅暂存超过 64 条以 1008 断开；单次客户端请求背后的 DB / Redis 操作 5 秒超时；连接协程与 Redis 订阅回调有 panic 保护；内部错误写日志。
+
 ## 6. 文档与契约同步（先于计划完成）
 
 - **PRD v1.6**：F3.2 写明 presence 只有在线 / 离线，离线时宠物显示为睡觉；打卡状态随打卡功能。
