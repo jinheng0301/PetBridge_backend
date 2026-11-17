@@ -42,6 +42,24 @@ func (i *Issuer) Sign(userID string) (string, error) {
 
 // Parse verifies signature, algorithm and expiry and returns the subject.
 func (i *Issuer) Parse(token string) (string, error) {
+	claims, err := i.claims(token)
+	if err != nil {
+		return "", err
+	}
+	return claims.Subject, nil
+}
+
+// Expiry verifies the token like Parse and returns when it expires. The
+// WebSocket handler closes the connection at that moment.
+func (i *Issuer) Expiry(token string) (time.Time, error) {
+	claims, err := i.claims(token)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return claims.ExpiresAt.Time, nil
+}
+
+func (i *Issuer) claims(token string) (*jwt.RegisteredClaims, error) {
 	claims := &jwt.RegisteredClaims{}
 	_, err := jwt.ParseWithClaims(token, claims,
 		func(*jwt.Token) (any, error) { return i.key, nil },
@@ -51,14 +69,14 @@ func (i *Issuer) Parse(token string) (string, error) {
 	)
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
-			return "", ErrTokenExpired
+			return nil, ErrTokenExpired
 		}
-		return "", ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 	if claims.Subject == "" {
-		return "", ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
-	return claims.Subject, nil
+	return claims, nil
 }
 
 // NewRefreshToken returns 32 random bytes (base64url) and its stored hash.

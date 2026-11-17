@@ -126,3 +126,20 @@ func TestNewRefreshToken(t *testing.T) {
 		t.Fatalf("raw len %d, hash %q", len(raw1), hash1)
 	}
 }
+
+func TestExpiry_ReturnsExpClaim(t *testing.T) {
+	c := newClock()
+	iss := newTestIssuer(c)
+	tok, _ := iss.Sign("u1")
+	exp, err := iss.Expiry(tok)
+	if err != nil || !exp.Equal(c.now().Add(15*time.Minute)) {
+		t.Fatalf("Expiry = %v, %v", exp, err)
+	}
+	if _, err := iss.Expiry("garbage"); !errors.Is(err, ErrTokenInvalid) {
+		t.Fatalf("garbage err = %v", err)
+	}
+	c.advance(16 * time.Minute)
+	if _, err := iss.Expiry(tok); !errors.Is(err, ErrTokenExpired) {
+		t.Fatalf("expired err = %v", err)
+	}
+}
