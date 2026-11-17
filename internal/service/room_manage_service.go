@@ -208,8 +208,6 @@ func (s *ManageService) Leave(ctx context.Context, userID, roomID string) error 
 			return err
 		}
 		events = []Event{memberLeftEvent(room.ID, userID, "left", userIDs(remaining))}
-		// The leaver's other devices learn they are out of the room.
-		events = append(events, roomKickedEvents(room.ID, "left", []string{userID})...)
 		return nil
 	})
 	if err != nil {
@@ -257,12 +255,8 @@ func (s *ManageService) Dissolve(ctx context.Context, ownerID, roomID string) (m
 		}
 		res = model.RoomSummary{ID: room.ID, Status: "open", MemberCount: 1, Capacity: room.Capacity}
 		events = roomKickedEvents(room.ID, "dissolved", removed)
-		// The owner, still seated, sees each removed member leave.
-		for _, u := range removed {
-			events = append(events, memberLeftEvent(room.ID, u, "dissolved", []string{ownerID}))
-		}
 		if len(holders) > 0 {
-			events = append(events, Event{Type: EventCodeInvalidated, Kind: KindPersonal, RoomID: room.ID, To: holders,
+			events = append(events, Event{Type: EventCodeInvalidated, RoomID: room.ID, To: holders,
 				Data: map[string]any{"room_id": room.ID, "reason": "dissolved"}})
 		}
 		return nil

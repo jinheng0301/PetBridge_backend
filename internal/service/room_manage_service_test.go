@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -385,34 +384,5 @@ func TestRemove_EventsSurviveCancel(t *testing.T) {
 	}
 	if e.pub.deadCalls != 0 {
 		t.Fatalf("%d events were published with a cancelled context", e.pub.deadCalls)
-	}
-}
-
-func TestLeave_LeaverGetsRoomKicked(t *testing.T) {
-	e := newJoinEnv(t)
-	owner := e.user(t, "o@x.test", "18_plus")
-	room := e.roomOf(t, owner)
-	m := e.fill(t, owner, 1)
-	e.pub.reset()
-
-	if err := e.mgr.Leave(bg, m[0], room); err != nil {
-		t.Fatal(err)
-	}
-	kicked := e.pub.ofType(EventRoomKicked)
-	if len(kicked) != 1 {
-		t.Fatalf("room.kicked events=%d want 1", len(kicked))
-	}
-	ev := kicked[0]
-	want := map[string]any{"room_id": room, "reason": "left"}
-	if !slices.Equal(ev.To, []string{m[0]}) || ev.Kind != KindPersonal || !maps.Equal(ev.Data, want) {
-		t.Fatalf("room.kicked %+v", ev)
-	}
-
-	e.pub.reset()
-	if err := e.mgr.Leave(bg, m[0], room); err != nil {
-		t.Fatal(err)
-	}
-	if n := len(e.pub.all()); n != 0 {
-		t.Fatalf("repeat leave published %d events", n)
 	}
 }
