@@ -149,3 +149,37 @@ func TestDissolve_MembersCanRejoinOnceWithoutSecondReward(t *testing.T) {
 	}
 	e.assertConsistent(t, room)
 }
+
+func TestDissolve_OwnerGetsMemberLeft(t *testing.T) {
+	e := newJoinEnv(t)
+	owner := e.user(t, "o@x.test", "18_plus")
+	room := e.roomOf(t, owner)
+	m := e.fill(t, owner, 2)
+	e.pub.reset()
+
+	if _, err := e.mgr.Dissolve(bg, owner, room); err != nil {
+		t.Fatal(err)
+	}
+	left := e.pub.ofType(EventMemberLeft)
+	if len(left) != 2 {
+		t.Fatalf("member.left events=%d want 2", len(left))
+	}
+	var users []string
+	for _, ev := range left {
+		if !slices.Equal(ev.To, []string{owner}) || ev.Data["reason"] != "dissolved" || ev.Kind != KindState {
+			t.Fatalf("member.left %+v", ev)
+		}
+		users = append(users, ev.Data["user_id"].(string))
+	}
+	if slices.Sort(users); !slices.Equal(users, sorted(m...)) {
+		t.Fatalf("member.left users %v want %v", users, sorted(m...))
+	}
+
+	e.pub.reset()
+	if _, err := e.mgr.Dissolve(bg, owner, room); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(e.pub.all()); n != 0 {
+		t.Fatalf("second dissolve published %d events", n)
+	}
+}
