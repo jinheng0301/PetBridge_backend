@@ -29,7 +29,6 @@ type Config struct {
 	RewardCodeLifetimeCap int // max reward codes a user can ever receive
 	OwnerRegenDailyLimit  int // owner code regenerations allowed per day
 	AIProvider            string
-	GoogleClientID        string // OAuth Web client ID; empty keeps Google login not configured
 }
 
 // ValidationError lists every configuration problem found. Problems contain
@@ -78,13 +77,12 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 
 	c := &Config{
-		AppEnv:         required("APP_ENV"), // no default: a missing value must not silently relax checks
-		LogLevel:       get("LOG_LEVEL", "info"),
-		AIProvider:     get("AI_PROVIDER", "fake"),
-		DatabaseURL:    required("DATABASE_URL"),
-		RedisURL:       required("REDIS_URL"),
-		JWTSigningKey:  required("JWT_SIGNING_KEY"),
-		GoogleClientID: get("GOOGLE_CLIENT_ID", ""),
+		AppEnv:        required("APP_ENV"), // no default: a missing value must not silently relax checks
+		LogLevel:      get("LOG_LEVEL", "info"),
+		AIProvider:    get("AI_PROVIDER", "fake"),
+		DatabaseURL:   required("DATABASE_URL"),
+		RedisURL:      required("REDIS_URL"),
+		JWTSigningKey: required("JWT_SIGNING_KEY"),
 	}
 	if c.AppEnv != "" {
 		oneOf("APP_ENV", c.AppEnv, "local", "staging", "production")

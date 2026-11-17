@@ -95,11 +95,7 @@ func main() {
 		}, time.Now)
 
 	authn := middleware.Auth(issuer, userSvc)
-	var googleVerifier idtoken.Verifier = idtoken.NotConfiguredVerifier{}
-	if cfg.GoogleClientID != "" {
-		googleVerifier = idtoken.NewGoogleVerifier(cfg.GoogleClientID)
-	}
-	authHandler := handler.NewAuthHandler(authSvc, cfg.DevLoginEnabled, idtoken.NotConfiguredVerifier{}, googleVerifier).
+	authHandler := handler.NewAuthHandler(authSvc, cfg.DevLoginEnabled, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
 		WithLoginLimit(middleware.RateLimitIP(counter, "login", 10, time.Minute))
 	userHandler := handler.NewUserHandler(userSvc, authn)
 	manageSvc := service.NewManageService(users, rooms, members, codes, bans, retryTx, service.NopPublisher{},
