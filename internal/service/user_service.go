@@ -105,6 +105,7 @@ type UserService struct {
 	codes       InviteCodeStore
 	tx          TxRunner
 	codeTTLDays int
+	capacity    int // seats of each new room; DefaultRoomCapacity unless WithRoomCapacity
 	now         func() time.Time
 	newCode     func() (string, error) // tests replace it to force collisions
 }
@@ -112,7 +113,17 @@ type UserService struct {
 func NewUserService(users UserStore, rooms RoomStore, members RoomMemberStore, codes InviteCodeStore,
 	tx TxRunner, codeTTLDays int, now func() time.Time) *UserService {
 	return &UserService{users: users, rooms: rooms, members: members, codes: codes, tx: tx,
-		codeTTLDays: codeTTLDays, now: now, newCode: NewCode}
+		codeTTLDays: codeTTLDays, capacity: DefaultRoomCapacity, now: now, newCode: NewCode}
+}
+
+// DefaultRoomCapacity is ROOM_CAPACITY's default: the owner and four guests.
+const DefaultRoomCapacity = 5
+
+// WithRoomCapacity sets the capacity of rooms created by onboarding from now
+// on (ROOM_CAPACITY, validated 2..5 by config); existing rooms keep theirs.
+func (s *UserService) WithRoomCapacity(n int) *UserService {
+	s.capacity = n
+	return s
 }
 
 const maxCodeAttempts = 5
@@ -175,7 +186,7 @@ func (s *UserService) Onboard(ctx context.Context, userID string, in model.Onboa
 		if err := s.users.CompleteOnboarding(ctx, userID, in, pet, now); err != nil {
 			return err
 		}
-		room, err := s.rooms.CreateForOwner(ctx, userID)
+		room, err := s.rooms.CreateForOwner(ctx, userID, s.capacity)
 		if err != nil {
 			return err
 		}

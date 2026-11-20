@@ -57,7 +57,7 @@ func (r *RoomMemberRepo) AgeBands(ctx context.Context, roomID string) ([]string,
 func (r *RoomMemberRepo) AddMember(ctx context.Context, roomID, userID string) (int, error) {
 	var seat int
 	err := conn(ctx, r.pool).QueryRow(ctx, `insert into room_members(room_id, user_id, seat_no, role)
-		select $1, $2, s, 'member' from generate_series(1,5) s
+		select $1, $2, s, 'member' from generate_series(1, (select capacity from rooms where id=$1)) s
 		where not exists (select 1 from room_members where room_id=$1 and seat_no=s and left_at is null)
 		order by s limit 1 returning seat_no`, roomID, userID).Scan(&seat)
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -79,7 +79,8 @@ func main() {
 	issuer := service.NewIssuer(cfg.JWTSigningKey, cfg.AccessTokenTTL, time.Now)
 	authSvc := service.NewAuthService(users, repository.NewAuthIdentityRepo(pool),
 		repository.NewRefreshTokenRepo(pool), tx, issuer, cfg.RefreshTokenTTL)
-	userSvc := service.NewUserService(users, rooms, members, codes, tx, cfg.CodeTTLDays, time.Now)
+	userSvc := service.NewUserService(users, rooms, members, codes, tx, cfg.CodeTTLDays, time.Now).
+		WithRoomCapacity(cfg.RoomCapacity)
 
 	// Rate limits live in Redis and fall back to in-process counters while it is down.
 	counter := ratelimit.NewFallback(ratelimit.NewRedis(rdb), ratelimit.NewMemory(time.Now),

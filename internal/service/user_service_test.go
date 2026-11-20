@@ -332,3 +332,19 @@ func TestOnboard_ReloadFailureIsReportedAndRetrySucceeds(t *testing.T) {
 		t.Fatal("retry must not create a second room")
 	}
 }
+
+func TestOnboard_UsesConfiguredRoomCapacity(t *testing.T) {
+	svc, pool, _ := setupUser(t)
+	svc.WithRoomCapacity(3)
+	uid := newUser(t, pool)
+	res, err := svc.Onboard(bg, uid, valid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Room.Capacity != 3 {
+		t.Fatalf("result capacity = %d, want 3", res.Room.Capacity)
+	}
+	if n := count(t, pool, `select capacity from rooms where owner_id=$1`, uid); n != 3 {
+		t.Fatalf("rooms.capacity = %d, want 3", n)
+	}
+}

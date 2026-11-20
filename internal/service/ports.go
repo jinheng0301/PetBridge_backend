@@ -37,7 +37,7 @@ type RefreshTokenStore interface {
 }
 
 type RoomStore interface {
-	CreateForOwner(ctx context.Context, ownerID string) (model.RoomInfo, error)
+	CreateForOwner(ctx context.Context, ownerID string, capacity int) (model.RoomInfo, error)
 	GetByOwner(ctx context.Context, ownerID string) (model.RoomInfo, error)
 	// LockRooms dedupes ids and locks them ORDER BY id FOR UPDATE; missing ids are absent from the map.
 	LockRooms(ctx context.Context, ids ...string) (map[string]model.RoomState, error)

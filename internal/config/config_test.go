@@ -237,14 +237,17 @@ func TestLoad_BusinessDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.RewardCodeCount != 3 || c.RewardCodeLifetimeCap != 20 || c.OwnerRegenDailyLimit != 3 {
-		t.Fatalf("unexpected business defaults: %d/%d/%d",
-			c.RewardCodeCount, c.RewardCodeLifetimeCap, c.OwnerRegenDailyLimit)
+	if c.RewardCodeCount != 3 || c.RewardCodeLifetimeCap != 20 || c.OwnerRegenDailyLimit != 3 || c.RoomCapacity != 5 {
+		t.Fatalf("unexpected business defaults: %d/%d/%d/%d",
+			c.RewardCodeCount, c.RewardCodeLifetimeCap, c.OwnerRegenDailyLimit, c.RoomCapacity)
 	}
 }
 
 func TestLoad_BusinessValuesInvalid(t *testing.T) {
 	cases := []struct{ name, val string }{
+		{"ROOM_CAPACITY", "1"},
+		{"ROOM_CAPACITY", "6"},
+		{"ROOM_CAPACITY", "x"},
 		{"REWARD_CODE_COUNT", "-1"},
 		{"REWARD_CODE_COUNT", "6"},
 		{"REWARD_CODE_COUNT", "x"},

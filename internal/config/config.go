@@ -29,6 +29,7 @@ type Config struct {
 	RefreshTokenTTL       time.Duration
 	DevLoginEnabled       bool
 	CodeTTLDays           int
+	RoomCapacity          int // seats per room, owner included; 2..5 (room_members.seat_no is 1..5)
 	RewardCodeCount       int // reward invite codes granted per successful join; 0 disables
 	RewardCodeLifetimeCap int // max reward codes a user can ever receive
 	OwnerRegenDailyLimit  int // owner code regenerations allowed per day
@@ -117,6 +118,12 @@ func Load(getenv func(string) string) (*Config, error) {
 		add("CODE_TTL_DAYS must be an integer between 1 and 365")
 	}
 	c.CodeTTLDays = ttlDays
+
+	capacity, err := strconv.Atoi(get("ROOM_CAPACITY", "5"))
+	if err != nil || capacity < 2 || capacity > 5 {
+		add("ROOM_CAPACITY must be an integer between 2 and 5")
+	}
+	c.RoomCapacity = capacity
 
 	rewardCount, err := strconv.Atoi(get("REWARD_CODE_COUNT", "3"))
 	if err != nil || rewardCount < 0 || rewardCount > 5 {
