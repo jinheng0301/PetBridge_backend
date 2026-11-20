@@ -21,9 +21,10 @@ import (
 // ErrInvalidToken means the ID token failed signature or claim checks.
 var ErrInvalidToken = errors.New("invalid id token")
 
-// errKeyFetch marks failures to download the provider's signing keys, so an
-// outage is not reported as a bad token in logs.
-var errKeyFetch = errors.New("fetch signing keys")
+// ErrUnavailable marks failures to download the provider's signing keys: an
+// outage on their side, not a bad token. The API answers 503 so the client
+// retries instead of treating the login as rejected.
+var ErrUnavailable = errors.New("fetch signing keys")
 
 const (
 	defaultGoogleJWKSURL = "https://www.googleapis.com/oauth2/v3/certs"
@@ -99,7 +100,7 @@ func (v *GoogleVerifier) Verify(ctx context.Context, idToken string) (string, er
 		jwt.WithTimeFunc(v.now),
 	)
 	if err != nil {
-		if errors.Is(err, errKeyFetch) {
+		if errors.Is(err, ErrUnavailable) {
 			return "", err
 		}
 		return "", fmt.Errorf("%w: %v", ErrInvalidToken, err)
@@ -148,15 +149,15 @@ func (v *GoogleVerifier) refresh(ctx context.Context, now time.Time) error {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.jwksURL, nil)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errKeyFetch, err)
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	resp, err := v.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errKeyFetch, err)
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: status %d", errKeyFetch, resp.StatusCode)
+		return fmt.Errorf("%w: status %d", ErrUnavailable, resp.StatusCode)
 	}
 	var body struct {
 		Keys []struct {
@@ -167,7 +168,7 @@ func (v *GoogleVerifier) refresh(ctx context.Context, now time.Time) error {
 		} `json:"keys"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJWKSBody)).Decode(&body); err != nil {
-		return fmt.Errorf("%w: decode: %v", errKeyFetch, err)
+		return fmt.Errorf("%w: decode: %v", ErrUnavailable, err)
 	}
 	keys := make(map[string]*rsa.PublicKey, len(body.Keys))
 	for _, k := range body.Keys {
@@ -181,7 +182,7 @@ func (v *GoogleVerifier) refresh(ctx context.Context, now time.Time) error {
 		keys[k.Kid] = pub
 	}
 	if len(keys) == 0 {
-		return fmt.Errorf("%w: no usable RSA keys", errKeyFetch)
+		return fmt.Errorf("%w: no usable RSA keys", ErrUnavailable)
 	}
 	v.keys = keys
 	v.fetchedAt = now

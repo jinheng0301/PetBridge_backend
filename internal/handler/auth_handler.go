@@ -98,6 +98,11 @@ func (h *AuthHandler) loginWith(provider string, v idtoken.Verifier) gin.Handler
 			Fail(c, http.StatusNotImplemented, model.CodeProviderNotConfigured, provider+" login is not configured")
 			return
 		}
+		if errors.Is(err, idtoken.ErrUnavailable) {
+			_ = c.Error(err) // logged by AccessLog; never echoed to the client
+			Fail(c, http.StatusServiceUnavailable, model.CodeNotReady, provider+" login is temporarily unavailable")
+			return
+		}
 		if err != nil || sub == "" {
 			Fail(c, http.StatusUnauthorized, model.CodeUnauthorized, "invalid id token")
 			return

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -149,6 +150,15 @@ func TestAppleGoogle_VerifierRejectsToken(t *testing.T) {
 	e := newEnv(t, false, fakeVerifier{err: errors.New("bad signature")}, idtoken.NotConfiguredVerifier{})
 	w := e.do("POST", "/api/v1/auth/login/apple", `{"id_token":"x"}`)
 	if w.Code != 401 || errCode(t, w) != "UNAUTHORIZED" {
+		t.Fatalf("status %d code %q", w.Code, errCode(t, w))
+	}
+}
+
+func TestAppleGoogle_ProviderKeysUnavailable(t *testing.T) {
+	down := fakeVerifier{err: fmt.Errorf("%w: status 503", idtoken.ErrUnavailable)}
+	e := newEnv(t, false, idtoken.NotConfiguredVerifier{}, down)
+	w := e.do("POST", "/api/v1/auth/login/google", `{"id_token":"x"}`)
+	if w.Code != 503 || errCode(t, w) != "NOT_READY" {
 		t.Fatalf("status %d code %q", w.Code, errCode(t, w))
 	}
 }
