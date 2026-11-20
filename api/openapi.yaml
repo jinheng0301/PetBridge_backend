@@ -101,7 +101,10 @@ paths:
       operationId: loginGoogle
       tags: [auth]
       summary: Sign in with Google
-      description: Not available yet; returns 501 PROVIDER_NOT_CONFIGURED until real verification is wired up.
+      description: >
+        Verifies a Google ID token against Google's signing keys. Returns 501 PROVIDER_NOT_CONFIGURED
+        when GOOGLE_CLIENT_ID is not set, and 503 NOT_READY when Google's keys cannot be fetched
+        (retry later; this is not a rejected login).
       requestBody:
         required: true
         content:
@@ -114,6 +117,7 @@ paths:
         '403': { $ref: '#/components/responses/AccountDisabled' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '501': { $ref: '#/components/responses/ProviderNotConfigured' }
+        '503': { $ref: '#/components/responses/ProviderUnavailable' }
   /api/v1/auth/refresh:
     post:
       operationId: refreshToken
@@ -121,8 +125,11 @@ paths:
       summary: Rotate the refresh token
       description: >
         Returns a new access token and a new refresh token; the old refresh token stops working.
-        Presenting an already-used refresh token revokes the whole token family (REFRESH_REUSED).
-        Clients should refresh with a single in-flight request.
+        Presenting an already-used refresh token revokes the whole token family (REFRESH_REUSED),
+        except within 60 seconds of its rotation while the family still holds a live token: that is
+        treated as a client retrying a rotation whose response it lost, and returns a new pair (every
+        other token of the family stops working). Clients should refresh with a single in-flight
+        request, and keep their tokens on network errors and 5xx.
       requestBody:
         required: true
         content:
@@ -469,6 +476,11 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
     ProviderNotConfigured:
       description: PROVIDER_NOT_CONFIGURED. This login provider is not available yet.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ProviderUnavailable:
+      description: NOT_READY. The login provider's signing keys could not be fetched; retry later.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
