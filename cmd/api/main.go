@@ -94,6 +94,9 @@ func main() {
 		newFallbackLogger(log, "redis unavailable, realtime events delivered locally", 30*time.Second, time.Now))
 	presence := service.NewPresenceService(realtime.NewPresenceStore(rdb, "", rtCfg.PresenceTTL), hub, rooms, pub, rtCfg, time.Now)
 	pub.SetPresence(presence)
+	// A node that dies never announces its users offline; the others notice
+	// their presence entries expire (backend TRD 7.3, v1.8).
+	go presence.RunSweeper(ctx, rtCfg.PresenceTTL/2)
 	pub.SetLogger(log)
 	go pub.Run(ctx)
 	// A deadlock or serialization failure rolls the transaction back whole; run it once more.

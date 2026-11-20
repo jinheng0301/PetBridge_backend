@@ -35,6 +35,13 @@ type PresenceStore interface {
 	Count(ctx context.Context, userID string, now time.Time) (int, error)
 }
 
+// PresenceSweeper is the optional part of a PresenceStore that finds users
+// whose connections all expired without being removed (their node died).
+// Each such user is returned to exactly one caller.
+type PresenceSweeper interface {
+	Sweep(ctx context.Context, now time.Time) ([]string, error)
+}
+
 // RealtimeConfig holds the WebSocket protocol parameters (backend TRD 7.3, 9).
 // They are constants in production; tests shorten the timings.
 type RealtimeConfig struct {

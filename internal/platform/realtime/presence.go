@@ -11,7 +11,9 @@ import (
 // PresenceStore keeps one sorted set per user: members are connection ids,
 // scores are expiry times in Unix milliseconds. A user is online while any
 // member has not expired, so several connections on several nodes count
-// correctly and only the last one closing makes the user offline.
+// correctly and only the last one closing makes the user offline. The key
+// itself lives twice as long as a member, so that Sweep still finds the
+// expired members of a node that died without removing them.
 type PresenceStore struct {
 	c      *goredis.Client
 	prefix string
@@ -31,7 +33,7 @@ func (p *PresenceStore) Add(ctx context.Context, userID, connID string, now time
 	k := p.key(userID)
 	return p.countAfter(ctx, k, now, func(pipe goredis.Pipeliner) {
 		pipe.ZAdd(ctx, k, goredis.Z{Score: float64(now.Add(p.ttl).UnixMilli()), Member: connID})
-		pipe.PExpire(ctx, k, p.ttl)
+		pipe.PExpire(ctx, k, 2*p.ttl)
 	})
 }
 
@@ -43,10 +45,40 @@ func (p *PresenceStore) Remove(ctx context.Context, userID, connID string, now t
 	})
 }
 
-// Count returns how many of the user's connections are still live at now,
-// pruning expired ones on the way.
+// Count returns how many of the user's connections are still live at now.
+// It does not prune: removing the last expired member is Sweep's job, since
+// whoever removes it is the one who announces the user offline.
 func (p *PresenceStore) Count(ctx context.Context, userID string, now time.Time) (int, error) {
-	return p.countAfter(ctx, p.key(userID), now, func(goredis.Pipeliner) {})
+	n, err := p.c.ZCount(ctx, p.key(userID), "("+strconv.FormatInt(now.UnixMilli(), 10), "+inf").Result()
+	return int(n), err
+}
+
+// Sweep prunes expired members of every user and returns the users it took
+// from online to offline: those whose last live members it removed itself.
+// Exactly one caller (node) gets each user, because only one pruning MULTI can
+// remove a given member. Connections closed normally are not reported here:
+// Remove already counted them.
+func (p *PresenceStore) Sweep(ctx context.Context, now time.Time) ([]string, error) {
+	ms := strconv.FormatInt(now.UnixMilli(), 10)
+	keyPrefix := p.prefix + "presence:u:"
+	var offline []string
+	iter := p.c.Scan(ctx, 0, keyPrefix+"*", 200).Iterator()
+	for iter.Next(ctx) {
+		k := iter.Val()
+		var removed, live *goredis.IntCmd
+		_, err := p.c.TxPipelined(ctx, func(pipe goredis.Pipeliner) error {
+			removed = pipe.ZRemRangeByScore(ctx, k, "-inf", ms)
+			live = pipe.ZCount(ctx, k, "("+ms, "+inf")
+			return nil
+		})
+		if err != nil {
+			return offline, err
+		}
+		if removed.Val() > 0 && live.Val() == 0 {
+			offline = append(offline, k[len(keyPrefix):])
+		}
+	}
+	return offline, iter.Err()
 }
 
 // countAfter runs change, prunes expired members and counts live ones in a

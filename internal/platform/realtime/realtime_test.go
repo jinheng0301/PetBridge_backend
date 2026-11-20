@@ -185,7 +185,40 @@ func TestPresence_KeyHasTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ttl <= 0 || ttl > 70*time.Second {
-		t.Fatalf("PTTL = %v, want (0, 70s]", ttl)
+	// Twice the member TTL, so Sweep can still find a dead node's members.
+	if ttl <= 70*time.Second || ttl > 140*time.Second {
+		t.Fatalf("PTTL = %v, want (70s, 140s]", ttl)
+	}
+}
+
+func TestPresence_SweepReportsEachExpiredUserOnce(t *testing.T) {
+	c, p := newTestRedis(t)
+	ps := NewPresenceStore(c, p, 70*time.Second)
+	ctx := context.Background()
+	now := time.Now()
+	for _, a := range [][2]string{{"dead", "c1"}, {"dead", "c2"}, {"alive", "c3"}, {"closed", "c4"}} {
+		if _, err := ps.Add(ctx, a[0], a[1], now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	later := now.Add(60 * time.Second)
+	if _, err := ps.Add(ctx, "alive", "c3", later); err != nil { // still pinging
+		t.Fatal(err)
+	}
+	if _, err := ps.Remove(ctx, "closed", "c4", now); err != nil { // closed normally
+		t.Fatal(err)
+	}
+	if got, err := ps.Sweep(ctx, now.Add(30*time.Second)); err != nil || len(got) != 0 {
+		t.Fatalf("early Sweep = %v, %v; want nothing", got, err)
+	}
+	if n, _ := ps.Count(ctx, "dead", now.Add(71*time.Second)); n != 0 {
+		t.Fatalf("Count after expiry = %d, want 0", n)
+	}
+	got, err := ps.Sweep(ctx, now.Add(71*time.Second))
+	if err != nil || len(got) != 1 || got[0] != "dead" {
+		t.Fatalf("Sweep = %v, %v; want [dead]", got, err)
+	}
+	if got, err := ps.Sweep(ctx, now.Add(72*time.Second)); err != nil || len(got) != 0 {
+		t.Fatalf("second Sweep = %v, %v; want nothing (already reported)", got, err)
 	}
 }

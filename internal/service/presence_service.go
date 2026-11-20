@@ -70,6 +70,39 @@ func (p *PresenceService) Status(ctx context.Context, userID string) string {
 	return model.PresenceOffline
 }
 
+// Sweep announces offline for users whose last connections expired without a
+// close, which happens when the node holding them died. It does nothing while
+// the store is down or cannot sweep. Run it more often than PresenceTTL
+// (RunSweeper does every half TTL): the store keeps expired members for one
+// more TTL only.
+func (p *PresenceService) Sweep(ctx context.Context) {
+	sw, ok := p.store.(PresenceSweeper)
+	if !ok {
+		return
+	}
+	users, _ := sw.Sweep(ctx, p.now()) // users found before a failure are still announced
+	for _, u := range users {
+		if p.hub.LocalCount(u) > 0 {
+			continue // a live connection here will refresh presence on its next ping
+		}
+		p.broadcast(ctx, u, model.PresenceOffline)
+	}
+}
+
+// RunSweeper calls Sweep every interval until ctx ends.
+func (p *PresenceService) RunSweeper(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			p.Sweep(ctx)
+		}
+	}
+}
+
 // broadcast sends one presence.update per seated room to the other members.
 func (p *PresenceService) broadcast(ctx context.Context, userID, status string) {
 	rooms, err := p.rooms.ListForMember(ctx, userID)

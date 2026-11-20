@@ -133,6 +133,30 @@ func (p *memPresence) Count(_ context.Context, u string, now time.Time) (int, er
 	return p.countLocked(u, now), nil
 }
 
+// Sweep implements PresenceSweeper like the Redis store: it prunes expired
+// members and reports users it emptied.
+func (p *memPresence) Sweep(_ context.Context, now time.Time) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fail {
+		return nil, errBusDown
+	}
+	var out []string
+	for u, conns := range p.conns {
+		removed := 0
+		for c, exp := range conns {
+			if !exp.After(now) {
+				delete(conns, c)
+				removed++
+			}
+		}
+		if removed > 0 && len(conns) == 0 {
+			out = append(out, u)
+		}
+	}
+	return out, nil
+}
+
 func (p *memPresence) countLocked(u string, now time.Time) int {
 	n := 0
 	for _, exp := range p.conns[u] {
@@ -446,5 +470,45 @@ func TestPublisher_CancelledCallerStillUsesBus(t *testing.T) {
 	defer e.mu.Unlock()
 	if e.fallbacks != 0 {
 		t.Fatalf("onFallback called %d times for a healthy bus", e.fallbacks)
+	}
+}
+
+func TestPresence_SweepAnnouncesDeadNodeUsersOffline(t *testing.T) {
+	e := newRTEnv(t)
+	owner, member, room := e.twoInRoom(t)
+	watcher := e.connect(t, "cw", owner, room)
+	// The member's only connection was on a node that died: its entry is in
+	// the store, never removed, and has expired.
+	if _, err := e.store.Add(bg, member, "on-dead-node", time.Now().Add(-71*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	e.presence.Sweep(bg)
+	f := framesOf(watcher, EventPresenceUpdate)
+	if len(f) != 1 {
+		t.Fatalf("presence frames %d want 1", len(f))
+	}
+	if u, s := presenceOf(t, f[0]); u != member || s != model.PresenceOffline {
+		t.Fatalf("presence %s %s", u, s)
+	}
+	e.presence.Sweep(bg)
+	if n := len(framesOf(watcher, EventPresenceUpdate)); n != 1 {
+		t.Fatalf("second sweep re-announced: frames=%d", n)
+	}
+}
+
+func TestPresence_SweepSkipsUserConnectedHere(t *testing.T) {
+	e := newRTEnv(t)
+	owner, member, room := e.twoInRoom(t)
+	watcher := e.connect(t, "cw", owner, room)
+	m := e.connect(t, "cm", member)
+	// A slow ping let the entry lapse, but the connection is still open here.
+	if _, err := e.store.Add(bg, member, m.id, time.Now().Add(-71*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	e.presence.Sweep(bg)
+	for _, f := range framesOf(watcher, EventPresenceUpdate) {
+		if _, s := presenceOf(t, f); s == model.PresenceOffline {
+			t.Fatal("a user connected to this node must not be announced offline")
+		}
 	}
 }
