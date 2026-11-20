@@ -348,3 +348,20 @@ func TestOnboard_UsesConfiguredRoomCapacity(t *testing.T) {
 		t.Fatalf("rooms.capacity = %d, want 3", n)
 	}
 }
+
+func TestOnboard_ReplayReturnsSameCodeExpiry(t *testing.T) {
+	svc, pool, c := setupUser(t)
+	c.t = c.t.Add(123456789 * time.Nanosecond) // sub-microsecond part the database drops
+	uid := newUser(t, pool)
+	first, err := svc.Onboard(bg, uid, valid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := svc.Onboard(bg, uid, valid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.InviteCode.ExpiresAt.Equal(again.InviteCode.ExpiresAt) {
+		t.Fatalf("expires_at first %v, replay %v", first.InviteCode.ExpiresAt, again.InviteCode.ExpiresAt)
+	}
+}

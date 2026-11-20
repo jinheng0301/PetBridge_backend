@@ -222,7 +222,8 @@ func (s *UserService) Onboard(ctx context.Context, userID string, in model.Onboa
 
 // insertSignupCode retries on primary-key collisions.
 func (s *UserService) insertSignupCode(ctx context.Context, roomID, userID string, now time.Time) (string, time.Time, error) {
-	expires := now.UTC().Add(time.Duration(s.codeTTLDays) * 24 * time.Hour)
+	// Microsecond precision and UTC: the same value the idempotent replay reads back.
+	expires := now.UTC().Add(time.Duration(s.codeTTLDays) * 24 * time.Hour).Truncate(time.Microsecond)
 	for i := 0; i < maxCodeAttempts; i++ {
 		code, err := s.newCode()
 		if err != nil {
