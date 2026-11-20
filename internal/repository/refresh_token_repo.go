@@ -46,15 +46,27 @@ func (r *RefreshTokenRepo) Rotate(ctx context.Context, hash string, now time.Tim
 	return t, err
 }
 
-// StateByHash reports whether the token with this hash is revoked and which
-// family it belongs to, or model.ErrNotFound.
-func (r *RefreshTokenRepo) StateByHash(ctx context.Context, hash string) (revoked bool, family string, err error) {
-	err = conn(ctx, r.pool).QueryRow(ctx,
-		`select revoked_at is not null, family_id::text from refresh_tokens where token_hash=$1`, hash).Scan(&revoked, &family)
+// LockByHash loads the token with this hash FOR UPDATE, or model.ErrNotFound.
+// The lock serialises concurrent retries of the same rotated token.
+func (r *RefreshTokenRepo) LockByHash(ctx context.Context, hash string) (model.RefreshTokenState, error) {
+	var t model.RefreshTokenState
+	err := conn(ctx, r.pool).QueryRow(ctx, `select id::text, user_id::text, family_id::text, device_id,
+			revoked_at, replaced_by::text, expires_at
+		from refresh_tokens where token_hash=$1 for update`, hash).
+		Scan(&t.ID, &t.UserID, &t.FamilyID, &t.DeviceID, &t.RevokedAt, &t.ReplacedBy, &t.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		err = model.ErrNotFound
+		return model.RefreshTokenState{}, model.ErrNotFound
 	}
-	return
+	return t, err
+}
+
+// FamilyHasLive reports whether the family still holds a usable token
+// (not revoked, not expired at now). Logout and theft revocation leave none.
+func (r *RefreshTokenRepo) FamilyHasLive(ctx context.Context, family string, now time.Time) (bool, error) {
+	var ok bool
+	err := conn(ctx, r.pool).QueryRow(ctx, `select exists(select 1 from refresh_tokens
+		where family_id=$1 and revoked_at is null and expires_at > $2)`, family, now).Scan(&ok)
+	return ok, err
 }
 
 func (r *RefreshTokenRepo) RevokeFamily(ctx context.Context, family string, now time.Time) error {

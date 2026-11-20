@@ -1,5 +1,7 @@
 package model
 
+import "time"
+
 type Tokens struct {
 	AccessToken  string
 	RefreshToken string
@@ -19,4 +21,13 @@ type RotatedRefreshToken struct {
 	UserID   string
 	FamilyID string
 	DeviceID *string
+}
+
+// RefreshTokenState is a refresh-token row as read (and locked) when it
+// could not be rotated: it is unknown, expired, or already revoked.
+type RefreshTokenState struct {
+	RotatedRefreshToken
+	RevokedAt  *time.Time
+	ReplacedBy *string
+	ExpiresAt  time.Time
 }

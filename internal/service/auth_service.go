@@ -16,13 +16,20 @@ type AuthService struct {
 	tx         TxRunner
 	issuer     *Issuer
 	refreshTTL time.Duration
+	reuseGrace time.Duration
 	now        func() time.Time // tests replace it with a fake clock
 }
+
+// RefreshReuseGrace is how long a just-rotated refresh token may be presented
+// again without counting as theft (backend TRD 7.1, v1.8). It covers a client
+// that never received or never stored the rotation's response: the server had
+// already rotated, so the client still holds the previous token.
+const RefreshReuseGrace = 60 * time.Second
 
 func NewAuthService(users UserStore, identities IdentityStore, tokens RefreshTokenStore, tx TxRunner,
 	iss *Issuer, refreshTTL time.Duration) *AuthService {
 	return &AuthService{users: users, identities: identities, tokens: tokens, tx: tx,
-		issuer: iss, refreshTTL: refreshTTL, now: time.Now}
+		issuer: iss, refreshTTL: refreshTTL, reuseGrace: RefreshReuseGrace, now: time.Now}
 }
 
 // LoginWithIdentity finds or creates the user behind (provider, subject) and
@@ -106,7 +113,10 @@ func (s *AuthService) result(userID string, onboarded bool, rawRefresh string) (
 }
 
 // Refresh rotates a refresh token. Presenting an already-revoked token is
-// treated as theft: the whole family is revoked.
+// treated as theft and revokes the whole family, except within reuseGrace of
+// its rotation while the family is still live: that is a client retrying a
+// rotation it never received, and it gets a new pair, every other live token
+// of the family being revoked so that only one stays usable.
 func (s *AuthService) Refresh(ctx context.Context, rawRefresh string) (model.LoginResult, error) {
 	hash := HashRefreshToken(rawRefresh)
 	now := s.now()
@@ -119,10 +129,12 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefresh string) (model.Log
 	err := s.tx.WithTx(ctx, func(ctx context.Context) error {
 		old, err := s.tokens.Rotate(ctx, hash, now)
 		if errors.Is(err, model.ErrNotFound) {
-			outcome, err = s.refreshLoser(ctx, hash, now)
-			return err
-		}
-		if err != nil {
+			var retry bool
+			old, retry, outcome, err = s.refreshLoser(ctx, hash, now)
+			if err != nil || !retry {
+				return err
+			}
+		} else if err != nil {
 			return err
 		}
 
@@ -161,24 +173,39 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefresh string) (model.Log
 	return s.result(userID, onboarded, raw)
 }
 
-// refreshLoser handles a token that could not be rotated. It returns the
-// error to report; the second value is non-nil only when the transaction must
-// roll back (nothing to persist).
-func (s *AuthService) refreshLoser(ctx context.Context, hash string, now time.Time) (outcome, rollback error) {
-	revoked, family, err := s.tokens.StateByHash(ctx, hash)
+// refreshLoser handles a token that could not be rotated. retry reports a
+// grace-window retry: the family's live tokens are already revoked and the
+// caller issues a new one in old's place. Otherwise outcome is the error to
+// report after commit; err is non-nil only when the transaction must roll back.
+func (s *AuthService) refreshLoser(ctx context.Context, hash string, now time.Time) (
+	old model.RotatedRefreshToken, retry bool, outcome, err error) {
+	st, err := s.tokens.LockByHash(ctx, hash)
 	if errors.Is(err, model.ErrNotFound) {
-		return nil, ErrRefreshInvalid
+		return old, false, ErrRefreshInvalid, nil
 	}
 	if err != nil {
-		return nil, err
+		return old, false, nil, err
 	}
-	if !revoked { // exists, not revoked: it must have expired
-		return nil, ErrRefreshInvalid
+	if st.RevokedAt == nil { // exists, not revoked: it must have expired
+		return old, false, ErrRefreshInvalid, nil
 	}
-	if err := s.tokens.RevokeFamily(ctx, family, now); err != nil {
-		return nil, err
+	if st.ReplacedBy != nil && now.Sub(*st.RevokedAt) <= s.reuseGrace && st.ExpiresAt.After(now) {
+		// Checked after the row lock, so a retry that committed meanwhile is seen.
+		live, err := s.tokens.FamilyHasLive(ctx, st.FamilyID, now)
+		if err != nil {
+			return old, false, nil, err
+		}
+		if live {
+			if err := s.tokens.RevokeFamily(ctx, st.FamilyID, now); err != nil {
+				return old, false, nil, err
+			}
+			return st.RotatedRefreshToken, true, nil, nil
+		}
 	}
-	return ErrRefreshReused, nil
+	if err := s.tokens.RevokeFamily(ctx, st.FamilyID, now); err != nil {
+		return old, false, nil, err
+	}
+	return old, false, ErrRefreshReused, nil
 }
 
 // Logout revokes the whole family of the given refresh token. It is

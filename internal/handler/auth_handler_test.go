@@ -168,7 +168,14 @@ func TestRefresh_Endpoint(t *testing.T) {
 	if w.Code != 200 || data(t, w)["refresh_token"] == refresh {
 		t.Fatalf("rotate: %d %s", w.Code, w.Body.String())
 	}
+	lost := data(t, w)["refresh_token"].(string)
+	// Within the reuse grace the old token is a retry and gets a new pair...
 	w = e.do("POST", "/api/v1/auth/refresh", `{"refresh_token":"`+refresh+`"}`)
+	if w.Code != 200 {
+		t.Fatalf("grace retry: %d %s", w.Code, w.Body.String())
+	}
+	// ...which revokes the pair the client never stored; presenting that is theft.
+	w = e.do("POST", "/api/v1/auth/refresh", `{"refresh_token":"`+lost+`"}`)
 	if w.Code != 401 || errCode(t, w) != "REFRESH_REUSED" {
 		t.Fatalf("replay: %d %q", w.Code, errCode(t, w))
 	}

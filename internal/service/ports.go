@@ -29,7 +29,8 @@ type IdentityStore interface {
 type RefreshTokenStore interface {
 	Insert(ctx context.Context, userID, hash, deviceID string, expiresAt time.Time, family *string) (string, error)
 	Rotate(ctx context.Context, hash string, now time.Time) (model.RotatedRefreshToken, error)
-	StateByHash(ctx context.Context, hash string) (revoked bool, family string, err error)
+	LockByHash(ctx context.Context, hash string) (model.RefreshTokenState, error)
+	FamilyHasLive(ctx context.Context, family string, now time.Time) (bool, error)
 	RevokeFamily(ctx context.Context, family string, now time.Time) error
 	SetReplacedBy(ctx context.Context, oldID, newID string) error
 	RevokeFamilyOfHash(ctx context.Context, hash string, now time.Time) error

@@ -124,12 +124,13 @@ func TestRefresh_RotatesAndKeepsFamily(t *testing.T) {
 }
 
 func TestRefresh_ReplayRevokesWholeFamily(t *testing.T) {
-	svc, _, _ := setupAuth(t)
+	svc, _, c := setupAuth(t)
 	r, _ := svc.LoginWithIdentity(bg, "dev", "a@local", "")
 	r2, err := svc.Refresh(bg, r.RefreshToken)
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.advance(RefreshReuseGrace + time.Second)
 	if _, err := svc.Refresh(bg, r.RefreshToken); !errors.Is(err, ErrRefreshReused) {
 		t.Fatalf("replay err = %v", err)
 	}
@@ -138,8 +139,84 @@ func TestRefresh_ReplayRevokesWholeFamily(t *testing.T) {
 	}
 }
 
-func TestRefresh_ConcurrentSameToken(t *testing.T) {
+// liveInFamily counts the usable tokens in the family of raw.
+func liveInFamily(t *testing.T, pool *pgxpool.Pool, raw string) int {
+	t.Helper()
+	return count(t, pool, `select count(*) from refresh_tokens where revoked_at is null and family_id =
+		(select family_id from refresh_tokens where token_hash='`+HashRefreshToken(raw)+`')`)
+}
+
+func TestRefresh_RetryWithinGraceIssuesNewPair(t *testing.T) {
+	svc, pool, c := setupAuth(t)
+	r, _ := svc.LoginWithIdentity(bg, "dev", "a@local", "")
+	lost, err := svc.Refresh(bg, r.RefreshToken) // the client never stored this one
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.advance(RefreshReuseGrace)
+	again, err := svc.Refresh(bg, r.RefreshToken)
+	if err != nil {
+		t.Fatalf("retry within grace: %v", err)
+	}
+	if again.RefreshToken == lost.RefreshToken || again.UserID != r.UserID {
+		t.Fatalf("again=%+v", again)
+	}
+	if _, err := svc.Refresh(bg, lost.RefreshToken); err == nil {
+		t.Fatal("the lost token must be revoked by the retry")
+	}
+	if n := liveInFamily(t, pool, r.RefreshToken); n != 0 {
+		// The lost token was presented after the retry and outside its own
+		// grace (never rotated), so the family is now revoked as theft.
+		t.Fatalf("live tokens = %d, want 0 after presenting the revoked lost token", n)
+	}
+}
+
+func TestRefresh_RetryWithinGraceKeepsOneLiveToken(t *testing.T) {
+	svc, pool, _ := setupAuth(t)
+	r, _ := svc.LoginWithIdentity(bg, "dev", "a@local", "")
+	if _, err := svc.Refresh(bg, r.RefreshToken); err != nil {
+		t.Fatal(err)
+	}
+	again, err := svc.Refresh(bg, r.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := liveInFamily(t, pool, r.RefreshToken); n != 1 {
+		t.Fatalf("live tokens = %d, want 1", n)
+	}
+	if _, err := svc.Refresh(bg, again.RefreshToken); err != nil {
+		t.Fatalf("retried token must rotate normally: %v", err)
+	}
+}
+
+func TestRefresh_NoGraceAfterLogout(t *testing.T) {
 	svc, _, _ := setupAuth(t)
+	r, _ := svc.LoginWithIdentity(bg, "dev", "a@local", "")
+	r2, err := svc.Refresh(bg, r.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Logout(bg, r2.RefreshToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Refresh(bg, r.RefreshToken); !errors.Is(err, ErrRefreshReused) {
+		t.Fatalf("err = %v, want ErrRefreshReused: logout leaves nothing to retry", err)
+	}
+}
+
+func TestRefresh_NoGraceForTokenRevokedWithoutRotation(t *testing.T) {
+	svc, _, _ := setupAuth(t)
+	r, _ := svc.LoginWithIdentity(bg, "dev", "a@local", "")
+	if err := svc.Logout(bg, r.RefreshToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Refresh(bg, r.RefreshToken); !errors.Is(err, ErrRefreshReused) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRefresh_ConcurrentSameToken(t *testing.T) {
+	svc, pool, _ := setupAuth(t)
 	r, _ := svc.LoginWithIdentity(bg, "dev", "a@local", "")
 	const n = 8
 	errs := make([]error, n)
@@ -152,17 +229,15 @@ func TestRefresh_ConcurrentSameToken(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	ok := 0
-	for _, err := range errs {
-		switch {
-		case err == nil:
-			ok++
-		case !errors.Is(err, ErrRefreshReused):
-			t.Fatalf("unexpected err %v", err)
+	// Within the grace window every caller is a retry; they serialise on the
+	// token row and each replaces the previous one's result.
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
 		}
 	}
-	if ok != 1 {
-		t.Fatalf("successes = %d, want exactly 1", ok)
+	if got := liveInFamily(t, pool, r.RefreshToken); got != 1 {
+		t.Fatalf("live tokens = %d, want exactly 1", got)
 	}
 }
 
