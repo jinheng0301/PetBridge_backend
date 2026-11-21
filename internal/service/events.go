@@ -8,12 +8,14 @@ import (
 
 // Event types (backend TRD chapter 9).
 const (
-	EventMemberJoined    = "member.joined"
-	EventCodeInvalidated = "code.invalidated"
-	EventMemberLeft      = "member.left"
-	EventRoomKicked      = "room.kicked"
-	EventPresenceUpdate  = "presence.update"
-	EventPetAction       = "pet.action"
+	EventMemberJoined      = "member.joined"
+	EventCodeInvalidated   = "code.invalidated"
+	EventMemberLeft        = "member.left"
+	EventRoomKicked        = "room.kicked"
+	EventPresenceUpdate    = "presence.update"
+	EventPetAction         = "pet.action"
+	EventMessageNew        = "message.new"
+	EventMessageTranslated = "message.translated"
 )
 
 // EventKind decides how an event is numbered and routed.
