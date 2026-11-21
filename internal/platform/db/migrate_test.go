@@ -202,8 +202,11 @@ func TestMigration0003_AddsRewardForColumn(t *testing.T) {
 	if err != nil || refs != 1 {
 		t.Fatalf("self-referencing fk count=%d err=%v", refs, err)
 	}
-	if err := db.MigrateDown(bg, dbtest.URL()); err != nil {
-		t.Fatal(err)
+	// 0004 is the latest migration now: roll it back first, then 0003.
+	for i := 0; i < 2; i++ {
+		if err := db.MigrateDown(bg, dbtest.URL()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var n int
 	if err := p.QueryRow(bg, `select count(*) from information_schema.columns
