@@ -24,6 +24,9 @@ var (
 	ErrNotRoomOwner      = errors.New("not the room owner")
 	ErrOwnerCannotLeave  = errors.New("owner cannot leave own room")
 	ErrCannotRemoveOwner = errors.New("cannot remove the room owner")
+
+	ErrAIUnavailable    = errors.New("ai: every provider failed")
+	ErrAIBudgetExceeded = errors.New("ai: daily hard cap reached")
 )
 
 // Reasons of a CodeIssueLimitError, in the order the checks run.
