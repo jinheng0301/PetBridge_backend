@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: PetBridge API
-  version: 0.4.0
+  version: 0.5.0
   description: >
     B3: health probes, authentication (dev login, Apple/Google stubs, refresh, logout),
     onboarding, joining a room by invite code, listing my codes and my rooms, and room management
-    (owner removes a member, dissolves the room or issues a code; members leave). Messages from B4 onward.
+    (owner removes a member, dissolves the room or issues a code; members leave), and (B5a) the phrase book and sending and listing room messages.
     Every business path lives under /api/v1; probes do not.
     Success bodies are {"data": ...}; failures are {"error": {code, message, request_id, details?}}.
     Login routes are limited to 10 requests per minute per client IP (429 RATE_LIMITED with Retry-After).
@@ -393,6 +393,76 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/rooms/{id}/messages:
+    post:
+      operationId: sendMessage
+      tags: [messages]
+      summary: Send a message to the room or to one member
+      description: >
+        The caller must be seated in the room (else 404 ROOM_NOT_FOUND). `text` is trimmed and must be
+        1 to 500 characters; a phrase message sends `phrase_id` instead and is never sent to AI. A dm
+        (`scope` dm) needs `to_user_id`, another seated member, and both must be adults (else 403
+        AGE_RESTRICTED). Idempotent on `client_msg_id`: replaying one returns the stored message and
+        sends no events. `polish` is accepted but has no effect until B5b (`polish_requested` stays
+        false). Receivers get `message.new` at once and `message.translated` when their translation
+        lands. Limited to 20 messages per minute and 1000 per day per user (429 RATE_LIMITED).
+        Invalid fields are 400 VALIDATION_FAILED with `error.details.fields`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendMessageRequest' }
+      responses:
+        '202':
+          description: The stored message as the sender sees it (delivery is null)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/MessageView' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/Internal' }
+    get:
+      operationId: listMessages
+      tags: [messages]
+      summary: Message history
+      description: >
+        Messages the caller sent or received in the room, oldest first by id. Without a cursor the
+        newest page; `before` gives the page just before that message id, `after` the page just after
+        it (use it to catch up after reconnecting); not both. `limit` defaults to 30, at most 100.
+        Receivers are fixed when a message is sent, so later joiners do not see earlier messages.
+        The caller must be seated (else 404 ROOM_NOT_FOUND). A bad cursor or limit is 400
+        VALIDATION_FAILED with `error.details.fields`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: before, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: after, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+      responses:
+        '200':
+          description: One page of messages
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/MessagePage' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
   /api/v1/codes:
     get:
       operationId: listCodes
@@ -414,6 +484,35 @@ paths:
                   data:
                     type: array
                     items: { $ref: '#/components/schemas/CodeListItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/config/phrases:
+    get:
+      operationId: getPhrases
+      tags: [config]
+      summary: Fixed phrase book
+      description: >
+        The fixed quick-phrases with their text in every supported language. Clients cache the book
+        and send its version in `v`; an unchanged version gets 304 with an empty body.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: v
+          in: query
+          required: false
+          description: The version the client already holds.
+          schema: { type: string }
+      responses:
+        '200':
+          description: The phrase book
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/PhraseBook' }
+        '304': { description: The client's version is current; empty body }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
         '500': { $ref: '#/components/responses/Internal' }
@@ -524,7 +623,7 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
     TooManyRequests:
       description: >
-        RATE_LIMITED (too many requests from this IP; wait for the Retry-After header) or
+        RATE_LIMITED (too many requests from this IP or user; wait for the Retry-After header) or
         CODE_COOLDOWN (too many wrong codes; wait error.details.retry_after_seconds, no header).
       headers:
         Retry-After:
@@ -534,6 +633,27 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
   schemas:
+    PhraseBook:
+      type: object
+      required: [version, phrases]
+      properties:
+        version: { type: string, example: '1' }
+        phrases:
+          type: array
+          items:
+            type: object
+            required: [id, texts]
+            properties:
+              id: { type: string, example: good_morning }
+              texts:
+                type: object
+                required: [ja, ko, zh-Hant, zh-Hans, en]
+                properties:
+                  ja: { type: string }
+                  ko: { type: string }
+                  zh-Hant: { type: string }
+                  zh-Hans: { type: string }
+                  en: { type: string }
     Error:
       type: object
       required: [error]
@@ -555,7 +675,7 @@ components:
             details:
               type: object
               description: >
-                fields on VALIDATION_FAILED from onboarding; room_id on ALREADY_MEMBER;
+                fields on VALIDATION_FAILED from onboarding and messages; room_id on ALREADY_MEMBER;
                 retry_after_seconds on CODE_COOLDOWN.
               properties:
                 fields:
@@ -726,3 +846,63 @@ components:
             id: { type: string, format: uuid }
             member_count: { type: integer }
             capacity: { type: integer }
+    SendMessageRequest:
+      type: object
+      required: [client_msg_id, kind]
+      properties:
+        client_msg_id: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Client-generated; the idempotency key.' }
+        kind: { type: string, enum: [text, phrase] }
+        text: { type: string, description: 'Required for kind text; trimmed, 1 to 500 characters.' }
+        phrase_id: { type: string, description: 'Required for kind phrase; an id from GET /config/phrases.', example: good_morning }
+        scope: { type: string, enum: [room, dm], default: room }
+        to_user_id: { type: string, format: uuid, description: 'Required for scope dm.' }
+        polish: { type: boolean, default: false, description: 'Text only; no effect until B5b.' }
+    SenderInfo:
+      type: object
+      required: [user_id, nickname, pet_type]
+      properties:
+        user_id: { type: string, format: uuid }
+        nickname: { type: string, nullable: true }
+        pet_type: { type: string, nullable: true, example: happy_shiba }
+    DeliveryView:
+      type: object
+      description: The receiver's own copy of the message.
+      required: [id, target_lang, base_text, translation_status, polished_text, polish_status]
+      properties:
+        id: { type: string, format: uuid }
+        target_lang: { type: string, enum: [ja, ko, zh-Hant, zh-Hans, en] }
+        base_text: { type: string, nullable: true, description: 'The translation; null until translation_status is done.' }
+        translation_status: { type: string, enum: [pending, done, failed] }
+        polished_text: { type: string, nullable: true }
+        polish_status: { type: string, enum: [none, pending, done, fallback] }
+    MessageView:
+      type: object
+      description: Shared by REST responses and the message events (backend TRD 7.4).
+      required: [id, room_id, sender, scope, to_user_id, kind, phrase_id, src_lang, text, client_msg_id,
+        polish_requested, created_at, delivery]
+      properties:
+        id: { type: string, format: uuid }
+        room_id: { type: string, format: uuid }
+        sender: { $ref: '#/components/schemas/SenderInfo' }
+        scope: { type: string, enum: [room, dm] }
+        to_user_id: { type: string, format: uuid, nullable: true }
+        kind: { type: string, enum: [text, phrase] }
+        phrase_id: { type: string, nullable: true }
+        src_lang: { type: string, enum: [ja, ko, zh-Hant, zh-Hans, en], description: "The sender's native_lang." }
+        text: { type: string, description: "The original text (a phrase in the sender's language)." }
+        client_msg_id: { type: string, nullable: true, description: "Only in the sender's own view." }
+        polish_requested: { type: boolean }
+        created_at: { type: string, format: date-time }
+        delivery:
+          allOf: [{ $ref: '#/components/schemas/DeliveryView' }]
+          nullable: true
+          description: "Null in the sender's view; the receiver's own delivery otherwise."
+    MessagePage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          description: Oldest first by id; [] when none (never null).
+          items: { $ref: '#/components/schemas/MessageView' }
+        has_more: { type: boolean }

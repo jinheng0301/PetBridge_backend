@@ -97,12 +97,21 @@ func newApp(t *testing.T, counter ratelimit.Counter) *app {
 		service.ManageConfig{CodeTTLDays: 7, RegenDailyLimit: 3, LifetimeCap: 20}, time.Now)
 	authn := middleware.Auth(iss, userSvc)
 	logs := &bytes.Buffer{}
+	quiet := logger.New("error", logs)
+	inline := service.NewInlinePool(1, func(context.Context, string) error { return nil }, quiet)
+	chatSvc := service.NewChatService(repository.NewTxManager(pool), users, repository.NewRoomMemberRepo(pool),
+		repository.NewMessageRepo(pool), service.PassModerator{}, nopQueue{}, inline, service.NopPublisher{},
+		time.Now, quiet)
 	r := server.NewRouter(logger.New("debug", logs), handler.NewHealthHandler(okProbe, okProbe),
 		handler.NewAuthHandler(authSvc, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
 			WithLoginLimit(middleware.RateLimitIP(counter, "login", 10, time.Minute)),
 		handler.NewUserHandler(userSvc, authn),
 		handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn).WithManage(manageSvc),
-		handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn))
+		handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn),
+		handler.NewConfigHandler(authn),
+		handler.NewChatHandler(chatSvc, authn,
+			middleware.RateLimitUser(counter, "msg", 20, time.Minute),
+			middleware.RateLimitUser(counter, "msgday", 1000, 24*time.Hour)))
 	return &app{r: r, pool: pool, logs: logs}
 }
 

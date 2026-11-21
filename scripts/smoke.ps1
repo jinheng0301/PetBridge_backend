@@ -1,5 +1,5 @@
 # Smoke test: /healthz must return 200 and /readyz must report status ok, then (when dev login is
-# enabled) login -> onboarding -> GET /me. then (B3) a second user joins the first user's room, then (B3b) leaves, and the owner issues a code and dissolves.
+# enabled) login -> onboarding -> GET /me. then (B3) a second user joins the first user's room, then (B5a) the owner sends a message the second user lists, then (B3b) the second user leaves, and the owner issues a code and dissolves.
 $ErrorActionPreference = 'Stop'
 
 # Port: APP_PORT from the environment, else from .env, else 8080.
@@ -80,6 +80,34 @@ try {
     exit 1
 }
 
+# B5a flow: while the second user is seated, the owner sends a text message and the second user lists it.
+try {
+    $msgRoom = $ob.data.room.id
+    $cmid = [guid]::NewGuid().ToString()
+    $msgBody = @{ client_msg_id = $cmid; kind = 'text'; text = 'Good morning from the smoke test' } | ConvertTo-Json
+    $send = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/rooms/$msgRoom/messages" -ContentType 'application/json; charset=utf-8' `
+        -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($msgBody)) -TimeoutSec 5
+    if ($send.StatusCode -ne 202) {
+        Write-Host "FAIL message send: status $($send.StatusCode), want 202"
+        exit 1
+    }
+    $sent = ($send.Content | ConvertFrom-Json).data
+    $list = Invoke-RestMethod -Method Get -Uri "$base/rooms/$msgRoom/messages" -Headers $headers2 -TimeoutSec 5
+    $got = @($list.data.items) | Where-Object { $_.id -eq $sent.id }
+    if (-not $got) {
+        Write-Host "FAIL message list: message $($sent.id) not in the second user's list"
+        exit 1
+    }
+    $status = $got.delivery.translation_status
+    if ($status -ne 'pending' -and $status -ne 'done') {
+        Write-Host "FAIL message list: translation_status is '$status', want pending or done"
+        exit 1
+    }
+    Write-Host "OK message send -> list (message=$($sent.id), translation_status=$status)"
+} catch {
+    Write-Host "FAIL message flow: $($_.Exception.Message)"
+    exit 1
+}
 
 # B3b flow: the second user leaves, then the first user (the owner) issues a code and dissolves.
 try {

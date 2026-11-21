@@ -12,11 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jinheng0301/petbridge/internal/bootstrap"
 	"github.com/jinheng0301/petbridge/internal/config"
 	"github.com/jinheng0301/petbridge/internal/handler"
 	"github.com/jinheng0301/petbridge/internal/middleware"
+	"github.com/jinheng0301/petbridge/internal/platform/aistore"
 	"github.com/jinheng0301/petbridge/internal/platform/db"
 	"github.com/jinheng0301/petbridge/internal/platform/logger"
+	"github.com/jinheng0301/petbridge/internal/platform/queue"
 	"github.com/jinheng0301/petbridge/internal/platform/ratelimit"
 	"github.com/jinheng0301/petbridge/internal/platform/realtime"
 	pbredis "github.com/jinheng0301/petbridge/internal/platform/redis"
@@ -133,7 +136,38 @@ func main() {
 		WithUpgradeLimit(middleware.RateLimitIP(counter, "ws", 60, time.Minute),
 			middleware.RateLimitUser(counter, "ws", 20, time.Minute)).
 		WithLogger(log)
-	router := server.NewRouter(log, health, authHandler, userHandler, roomHandler, codeHandler, wsHandler)
+
+	// Messages: translations go to the queue; when enqueueing fails this
+	// process translates inline and publishes through its own hub (backend TRD 7.4).
+	providers, err := bootstrap.Providers(ctx, cfg)
+	if err != nil {
+		log.Error("ai providers unavailable", "error", err.Error())
+		os.Exit(1)
+	}
+	gw := service.NewAIGateway(providers, aistore.NewCache(rdb),
+		aistore.NewCostMeter(rdb, newFallbackLogger(log, "redis unavailable, ai cost meter uses local counters", 30*time.Second, time.Now)),
+		service.GatewayConfig{
+			TranslateTimeout:  3 * time.Second,
+			MaxConcurrent:     16,
+			DailyBudgetMicros: cfg.AIDailyBudgetMicros,
+			ZeroCost:          bootstrap.ZeroCost(cfg),
+		}, time.Now, log)
+	msgs := repository.NewMessageRepo(pool)
+	translation := service.NewTranslationService(msgs, members, gw, service.PassModerator{}, pub, time.Now, log)
+	inline := service.NewInlinePool(4, translation.Process, log)
+	q, err := queue.New(cfg.RedisURL)
+	if err != nil {
+		log.Error("invalid redis configuration", "error", err.Error())
+		os.Exit(1)
+	}
+	defer q.Close()
+	chatSvc := service.NewChatService(tx, users, members, msgs, service.PassModerator{}, q, inline, pub, time.Now, log)
+	chatHandler := handler.NewChatHandler(chatSvc, authn,
+		middleware.RateLimitUser(counter, "msg", 20, time.Minute),
+		middleware.RateLimitUser(counter, "msgday", 1000, 24*time.Hour))
+
+	router := server.NewRouter(log, health, authHandler, userHandler, roomHandler, codeHandler,
+		handler.NewConfigHandler(authn), chatHandler, wsHandler)
 
 	log.Info("starting api", "app_env", cfg.AppEnv, "port", cfg.AppPort)
 	if err := server.Run(ctx, net.JoinHostPort(cfg.AppHost, strconv.Itoa(cfg.AppPort)), router, log, func() { wsHandler.Shutdown(5 * time.Second) }); err != nil {
