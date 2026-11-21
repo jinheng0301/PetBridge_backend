@@ -75,6 +75,7 @@ func TestLoad_BlankIsMissing(t *testing.T) {
 
 func TestLoad_ProductionSelfCheck(t *testing.T) {
 	ok := with(required(), "APP_ENV", "production", "AI_PROVIDER", "live",
+		"AI_PRIMARY", "claude", "ANTHROPIC_API_KEY", "sk-ant-x",
 		"DEV_LOGIN_ENABLED", "false", "JWT_SIGNING_KEY", strings.Repeat("k", 32))
 	if _, err := Load(env(ok)); err != nil {
 		t.Fatalf("valid production config rejected: %v", err)
@@ -311,5 +312,62 @@ func TestLoad_MinAppVersion(t *testing.T) {
 		if !errors.As(err, &ve) || !strings.Contains(err.Error(), "MIN_APP_VERSION must be a version such as 1.2.0") {
 			t.Fatalf("MIN_APP_VERSION=%q: err=%v", bad, err)
 		}
+	}
+}
+
+func TestLoad_AIDefaults(t *testing.T) {
+	c, err := Load(env(required()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AIPrimary != "gemini" || !c.GeminiFreeTier || c.ClaudeModelTranslate != "claude-haiku-5-5" ||
+		c.AIDailyBudgetMicros != 5_000_000 || c.WorkerConcurrency != 10 ||
+		c.FakeAILatency != 300*time.Millisecond {
+		t.Fatalf("unexpected AI defaults: %+v", c)
+	}
+}
+
+func TestLoad_AIValidation(t *testing.T) {
+	prod := with(required(),
+		"APP_ENV", "production",
+		"JWT_SIGNING_KEY", strings.Repeat("k", 32),
+		"DATABASE_URL", "postgres://u:p@db/petbridge?sslmode=require",
+		"AI_PROVIDER", "live")
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"bad primary", with(required(), "AI_PRIMARY", "openai"), "AI_PRIMARY"},
+		{"live gemini no key", with(required(), "AI_PROVIDER", "live"), "GEMINI_API_KEY"},
+		{"gemini key no model", with(required(), "AI_PROVIDER", "live", "GEMINI_API_KEY", "secret-gem-key"), "GEMINI_MODEL_TRANSLATE"},
+		{"live claude no key", with(required(), "AI_PROVIDER", "live", "AI_PRIMARY", "claude"), "ANTHROPIC_API_KEY"},
+		{"prod free tier", with(prod, "GEMINI_API_KEY", "secret-gem-key", "GEMINI_MODEL_TRANSLATE", "m"), "GEMINI_FREE_TIER"},
+		{"fail rate", with(required(), "FAKE_AI_FAIL_RATE", "1.5"), "FAKE_AI_FAIL_RATE"},
+		{"budget", with(required(), "AI_DAILY_BUDGET_USD", "0"), "AI_DAILY_BUDGET_USD"},
+		{"concurrency", with(required(), "WORKER_CONCURRENCY", "0"), "WORKER_CONCURRENCY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(env(tc.env))
+			p := problems(t, err)
+			if !strings.Contains(p, tc.want) {
+				t.Errorf("problems missing %s: %s", tc.want, p)
+			}
+			if strings.Contains(p, "secret-gem-key") {
+				t.Errorf("problems leak a key value: %s", p)
+			}
+		})
+	}
+}
+
+func TestLoad_ProductionClaudeOnly(t *testing.T) {
+	e := with(required(),
+		"APP_ENV", "production",
+		"JWT_SIGNING_KEY", strings.Repeat("k", 32),
+		"DATABASE_URL", "postgres://u:p@db/petbridge?sslmode=require",
+		"AI_PROVIDER", "live", "AI_PRIMARY", "claude", "ANTHROPIC_API_KEY", "sk-ant-x")
+	if _, err := Load(env(e)); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"regexp"
@@ -18,24 +19,35 @@ import (
 var versionRE = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 type Config struct {
-	AppEnv                string
-	AppHost               string // listen address; 127.0.0.1 by default when APP_ENV=local
-	AppPort               int
-	LogLevel              string
-	DatabaseURL           string
-	RedisURL              string
-	JWTSigningKey         string
-	AccessTokenTTL        time.Duration
-	RefreshTokenTTL       time.Duration
-	DevLoginEnabled       bool
-	CodeTTLDays           int
-	RoomCapacity          int // seats per room, owner included; 2..5 (room_members.seat_no is 1..5)
-	RewardCodeCount       int // reward invite codes granted per successful join; 0 disables
-	RewardCodeLifetimeCap int // max reward codes a user can ever receive
-	OwnerRegenDailyLimit  int // owner code regenerations allowed per day
-	AIProvider            string
-	GoogleClientID        string // OAuth Web client ID; empty keeps Google login not configured
-	MinAppVersion         string // sent in the WebSocket hello as min_app_version
+	AppEnv                  string
+	AppHost                 string // listen address; 127.0.0.1 by default when APP_ENV=local
+	AppPort                 int
+	LogLevel                string
+	DatabaseURL             string
+	RedisURL                string
+	JWTSigningKey           string
+	AccessTokenTTL          time.Duration
+	RefreshTokenTTL         time.Duration
+	DevLoginEnabled         bool
+	CodeTTLDays             int
+	RoomCapacity            int // seats per room, owner included; 2..5 (room_members.seat_no is 1..5)
+	RewardCodeCount         int // reward invite codes granted per successful join; 0 disables
+	RewardCodeLifetimeCap   int // max reward codes a user can ever receive
+	OwnerRegenDailyLimit    int // owner code regenerations allowed per day
+	AIProvider              string
+	AIPrimary               string // gemini | claude: which provider is tried first in live mode
+	GeminiAPIKey            string
+	GeminiModelTranslate    string
+	GeminiFreeTier          bool // Gemini free tier: its cost is recorded as 0
+	AnthropicAPIKey         string
+	ClaudeModelTranslate    string
+	FakeAILatency           time.Duration
+	FakeAIFailRate          float64 // 0..1, fake-primary
+	FakeAISecondaryFailRate float64 // 0..1, fake-secondary
+	AIDailyBudgetMicros     int64   // AI_DAILY_BUDGET_USD in millionths of a dollar; > 0
+	WorkerConcurrency       int     // 1..100
+	GoogleClientID          string  // OAuth Web client ID; empty keeps Google login not configured
+	MinAppVersion           string  // sent in the WebSocket hello as min_app_version
 }
 
 // ValidationError lists every configuration problem found. Problems contain
@@ -143,6 +155,44 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	c.OwnerRegenDailyLimit = regenLimit
 
+	c.AIPrimary = get("AI_PRIMARY", "gemini")
+	oneOf("AI_PRIMARY", c.AIPrimary, "gemini", "claude")
+	c.GeminiAPIKey = get("GEMINI_API_KEY", "")
+	c.GeminiModelTranslate = get("GEMINI_MODEL_TRANSLATE", "")
+	c.AnthropicAPIKey = get("ANTHROPIC_API_KEY", "")
+	c.ClaudeModelTranslate = get("CLAUDE_MODEL_TRANSLATE", "claude-haiku-5-5")
+	freeTier, err := strconv.ParseBool(get("GEMINI_FREE_TIER", "true"))
+	if err != nil {
+		add("GEMINI_FREE_TIER must be true or false")
+	}
+	c.GeminiFreeTier = freeTier
+	latencyMS, err := strconv.Atoi(get("FAKE_AI_LATENCY_MS", "300"))
+	if err != nil || latencyMS < 0 {
+		add("FAKE_AI_LATENCY_MS must be an integer of at least 0")
+	}
+	c.FakeAILatency = time.Duration(latencyMS) * time.Millisecond
+	rate := func(name string) float64 {
+		f, err := strconv.ParseFloat(get(name, "0"), 64)
+		if err != nil || f < 0 || f > 1 {
+			add("%s must be a number between 0 and 1", name)
+			return 0
+		}
+		return f
+	}
+	c.FakeAIFailRate = rate("FAKE_AI_FAIL_RATE")
+	c.FakeAISecondaryFailRate = rate("FAKE_AI_SECONDARY_FAIL_RATE")
+	budget, err := strconv.ParseFloat(get("AI_DAILY_BUDGET_USD", "5"), 64)
+	if err != nil || budget <= 0 || budget > 1e9 {
+		add("AI_DAILY_BUDGET_USD must be a number greater than 0")
+	} else {
+		c.AIDailyBudgetMicros = int64(math.Round(budget * 1_000_000))
+	}
+	workers, err := strconv.Atoi(get("WORKER_CONCURRENCY", "10"))
+	if err != nil || workers < 1 || workers > 100 {
+		add("WORKER_CONCURRENCY must be an integer between 1 and 100")
+	}
+	c.WorkerConcurrency = workers
+
 	c.MinAppVersion = get("MIN_APP_VERSION", "0.0.0")
 	if !versionRE.MatchString(c.MinAppVersion) {
 		add("MIN_APP_VERSION must be a version such as 1.2.0")
@@ -167,6 +217,21 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if c.AppEnv == "production" && c.AIProvider != "live" {
 		add("AI_PROVIDER must be live when APP_ENV=production")
+	}
+	if c.AIProvider == "live" {
+		geminiOnChain := c.AIPrimary == "gemini" || c.GeminiAPIKey != ""
+		if c.AIPrimary == "gemini" && c.GeminiAPIKey == "" {
+			add("GEMINI_API_KEY is required when AI_PROVIDER=live and AI_PRIMARY=gemini")
+		}
+		if c.GeminiAPIKey != "" && c.GeminiModelTranslate == "" {
+			add("GEMINI_MODEL_TRANSLATE is required when GEMINI_API_KEY is set")
+		}
+		if c.AIPrimary == "claude" && c.AnthropicAPIKey == "" {
+			add("ANTHROPIC_API_KEY is required when AI_PROVIDER=live and AI_PRIMARY=claude")
+		}
+		if c.AppEnv == "production" && geminiOnChain && c.GeminiFreeTier {
+			add("GEMINI_FREE_TIER must be false when APP_ENV=production and Gemini is in the provider chain")
+		}
 	}
 	if c.AppEnv != "" && c.AppEnv != "local" {
 		if c.JWTSigningKey != "" && len(c.JWTSigningKey) < 32 {
