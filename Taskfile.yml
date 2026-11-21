@@ -30,6 +30,11 @@ tasks:
     cmds:
       - go run ./cmd/api
 
+  worker:
+    desc: Run the translation worker
+    cmds:
+      - go run ./cmd/worker
+
   test:
     desc: Unit tests (no external services)
     cmds:
