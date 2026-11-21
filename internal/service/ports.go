@@ -119,3 +119,23 @@ type RewardStore interface {
 	Grant(ctx context.Context, userID, roomID string, count int) (inserted bool, err error)
 	InsertEdge(ctx context.Context, inviterID, inviteeID, code string) error
 }
+
+type MessageStore interface {
+	// ActiveRecipients returns every seated member of the room (the caller included) with native language and age band.
+	ActiveRecipients(ctx context.Context, roomID string) ([]model.Recipient, error)
+	// InsertMessage writes nothing on a (sender_id, client_msg_id) conflict and returns inserted=false.
+	InsertMessage(ctx context.Context, m model.NewMessage) (inserted bool, err error)
+	// FindByClientMsgID returns model.ErrNotFound when there is no such message.
+	FindByClientMsgID(ctx context.Context, senderID, clientMsgID string) (messageID string, err error)
+	InsertDeliveries(ctx context.Context, messageID string, ds []model.NewDelivery) error
+	// ViewsOf builds the sender's view and each receiver's view; a missing message returns model.ErrNotFound.
+	ViewsOf(ctx context.Context, messageID string) (model.MessageViews, error)
+	// ListForViewer returns only messages the viewer sent or received, items ordered by id ascending.
+	ListForViewer(ctx context.Context, roomID, viewerID string, q model.PageQuery) (items []model.MessageView, hasMore bool, err error)
+	// TranslationWork reads the message and all its non-done deliveries; Pending is empty when nothing is left.
+	TranslationWork(ctx context.Context, messageID string) (model.TranslationWork, error)
+	// SetTranslation only touches non-done rows: writes base_text and status, translate_attempts+1, updated_at=now; changed=false means already done.
+	SetTranslation(ctx context.Context, deliveryID string, baseText *string, status string, now time.Time) (changed bool, err error)
+	// StuckTranslations returns ids (distinct) of messages whose translation must be re-run (spec 5.5 sweep, first two rules).
+	StuckTranslations(ctx context.Context, now time.Time, pendingAfter, failedEvery, giveUpAfter time.Duration, limit int) ([]string, error)
+}
