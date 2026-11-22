@@ -2,7 +2,7 @@ package service
 
 // PhrasesVersion changes whenever any phrase text changes; clients cache the
 // book by it (GET /config/phrases?v=).
-const PhrasesVersion = "1"
+const PhrasesVersion = "2"
 
 // PhraseLangs are the languages every phrase must carry.
 var PhraseLangs = []string{"ja", "ko", "zh-Hant", "zh-Hans", "en"}
@@ -21,13 +21,13 @@ func phrase(id, ja, ko, zhHant, zhHans, en string) Phrase {
 
 var phraseBook = []Phrase{
 	phrase("good_morning", "おはようございます", "좋은 아침이에요", "早安", "早上好", "Good morning"),
-	phrase("good_night", "おやすみなさい", "안녕히 주무세요", "晚安", "晚安", "Good night"),
+	phrase("good_night", "おやすみなさい", "잘 자요", "晚安", "晚安", "Good night"),
 	phrase("thank_you", "ありがとうございます", "고마워요", "謝謝你", "谢谢你", "Thank you"),
 	phrase("sorry", "ごめんなさい", "미안해요", "對不起", "对不起", "Sorry"),
-	phrase("ok", "大丈夫です", "괜찮아요", "沒問題", "没问题", "No problem"),
+	phrase("ok", "大丈夫です", "괜찮아요", "沒問題", "没问题", "OK"),
 	phrase("see_you", "また会いましょう", "또 만나요", "下次見", "下次见", "See you later"),
 	phrase("congrats", "おめでとうございます", "축하해요", "恭喜你", "恭喜你", "Congratulations"),
-	phrase("take_care", "お大事にしてくださいね", "몸 조심하세요", "多保重喔", "多保重哦", "Take care"),
+	phrase("take_care", "お体に気をつけてくださいね", "몸조심하세요", "多保重喔", "多保重哦", "Take care"),
 }
 
 // Phrases returns the book in its fixed order. The result is a copy.
