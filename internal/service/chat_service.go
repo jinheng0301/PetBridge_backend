@@ -21,6 +21,10 @@ const (
 	adultBand    = "18_plus"
 )
 
+// enqueueTimeout bounds the hand-off to the queue: a hung Redis must not hold
+// the send request; past it the message is translated inline instead.
+const enqueueTimeout = 1 * time.Second
+
 var clientMsgIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // SendInput is the body of POST /rooms/{id}/messages. Polish is accepted but
@@ -168,7 +172,10 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 	s.pub.Publish(ctx, messageEvent(EventMessageNew, views.Sender, userID))
 
 	if hasPending(ds) {
-		if err := s.q.EnqueueTranslate(ctx, m.ID, ""); err != nil {
+		ectx, cancel := context.WithTimeout(ctx, enqueueTimeout)
+		err := s.q.EnqueueTranslate(ectx, m.ID, "")
+		cancel()
+		if err != nil {
 			if !s.inline.TryRun(m.ID) {
 				s.log.Warn("translation left for the sweep: enqueue failed and inline pool full",
 					"message_id", m.ID, "err", err)

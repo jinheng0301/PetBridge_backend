@@ -57,6 +57,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer rdb.Close()
+	// The asynq server needs its own connections (blocking dequeues outlast
+	// rdb's 2s read timeout). It parses the same REDIS_URL, so host and /db
+	// match what rdb and the api's queue use.
 	redisOpt, err := asynq.ParseRedisURI(cfg.RedisURL)
 	if err != nil {
 		log.Error("invalid redis configuration", "error", "invalid REDIS_URL")
@@ -87,18 +90,14 @@ func main() {
 		MaxConcurrent:     16,
 		DailyBudgetMicros: cfg.AIDailyBudgetMicros,
 		ZeroCost:          bootstrap.ZeroCost(cfg),
+		Prices:            bootstrap.Prices(cfg),
 	}, time.Now, log)
 
 	store := repository.NewMessageRepo(pool)
 	members := repository.NewRoomMemberRepo(pool)
 	translation := service.NewTranslationService(store, members, gw, service.PassModerator{}, pub, time.Now, log)
 
-	q, err := queue.New(cfg.RedisURL)
-	if err != nil {
-		log.Error("invalid redis configuration", "error", err.Error())
-		os.Exit(1)
-	}
-	defer q.Close()
+	q := queue.New(rdb) // shares rdb's fail-fast timeouts; rdb is closed above
 	sweep := service.NewSweepService(store, q, time.Now, log)
 
 	srv := asynq.NewServer(redisOpt, asynq.Config{

@@ -13,17 +13,24 @@ import (
 )
 
 // chatQueue records every enqueued message id and fails when err is set.
+// With hang set it blocks until ctx ends, like a black-holed Redis.
 type chatQueue struct {
-	mu  sync.Mutex
-	err error
-	ids []string
+	mu   sync.Mutex
+	err  error
+	hang bool
+	ids  []string
 }
 
-func (q *chatQueue) EnqueueTranslate(_ context.Context, messageID, _ string) error {
+func (q *chatQueue) EnqueueTranslate(ctx context.Context, messageID, _ string) error {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	q.ids = append(q.ids, messageID)
-	return q.err
+	hang, err := q.hang, q.err
+	q.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return err
 }
 
 func (q *chatQueue) calls() []string {
@@ -373,6 +380,31 @@ func TestSend_EnqueueFailsRunsInline(t *testing.T) {
 	case id := <-e.ran:
 		t.Fatalf("inline ran twice (%s)", id)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A hung enqueue must not hold the request: Send gives up after
+// enqueueTimeout and translates inline.
+func TestSend_EnqueueHangsFallsBackInline(t *testing.T) {
+	e := newChatEnv(t, 2)
+	e.seat(t, "k@example.com", "ko", "18_plus", 2)
+	e.q.hang = true
+
+	start := time.Now()
+	v, err := e.svc.Send(bg, e.owner, e.room, text("h1", "你好"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 1500*time.Millisecond {
+		t.Fatalf("Send took %v, want about %v", d, enqueueTimeout)
+	}
+	select {
+	case id := <-e.ran:
+		if id != v.ID {
+			t.Fatalf("inline ran %s, want %s", id, v.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("inline pool did not run")
 	}
 }
 

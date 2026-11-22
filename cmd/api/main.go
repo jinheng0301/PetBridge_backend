@@ -151,16 +151,12 @@ func main() {
 			MaxConcurrent:     16,
 			DailyBudgetMicros: cfg.AIDailyBudgetMicros,
 			ZeroCost:          bootstrap.ZeroCost(cfg),
+			Prices:            bootstrap.Prices(cfg),
 		}, time.Now, log)
 	msgs := repository.NewMessageRepo(pool)
 	translation := service.NewTranslationService(msgs, members, gw, service.PassModerator{}, pub, time.Now, log)
 	inline := service.NewInlinePool(4, translation.Process, log)
-	q, err := queue.New(cfg.RedisURL)
-	if err != nil {
-		log.Error("invalid redis configuration", "error", err.Error())
-		os.Exit(1)
-	}
-	defer q.Close()
+	q := queue.New(rdb) // shares rdb's fail-fast timeouts; rdb is closed above
 	chatSvc := service.NewChatService(tx, users, members, msgs, service.PassModerator{}, q, inline, pub, time.Now, log)
 	chatHandler := handler.NewChatHandler(chatSvc, authn,
 		middleware.RateLimitUser(counter, "msg", 20, time.Minute),

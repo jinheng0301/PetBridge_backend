@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 const (
@@ -27,13 +28,11 @@ type Queue struct {
 	c *asynq.Client
 }
 
-// New parses the Redis URL; only a malformed URL fails. The client connects lazily.
-func New(redisURL string) (*Queue, error) {
-	opt, err := asynq.ParseRedisURI(redisURL)
-	if err != nil {
-		return nil, errors.New("queue: invalid REDIS_URL")
-	}
-	return &Queue{c: asynq.NewClient(opt)}, nil
+// New builds the queue on the process's shared Redis client, so enqueueing
+// inherits its fail-fast timeouts and no-retry policy (TRD 12.2) instead of
+// asynq's own slower defaults. The caller owns rdb and closes it.
+func New(rdb *goredis.Client) *Queue {
+	return &Queue{c: asynq.NewClientFromRedisClient(rdb)}
 }
 
 // EnqueueTranslate adds translate:{messageID}[:dedupe]. A task with the same id
@@ -64,4 +63,6 @@ func RetryDelay(n int, _ error, _ *asynq.Task) time.Duration {
 	return 60 * time.Second
 }
 
-func (q *Queue) Close() error { return q.c.Close() }
+// Close is a no-op: the Redis connection is shared and closed by its owner
+// (asynq refuses to close a shared client).
+func (q *Queue) Close() error { return nil }

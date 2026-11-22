@@ -2,12 +2,16 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/hibiken/asynq"
+	goredis "github.com/redis/go-redis/v9"
+
+	pbredis "github.com/jinheng0301/petbridge/internal/platform/redis"
 )
 
 func TestRetryDelay(t *testing.T) {
@@ -22,9 +26,19 @@ func TestRetryDelay(t *testing.T) {
 	}
 }
 
-func TestNew_BadURL(t *testing.T) {
-	if _, err := New("not a url"); err == nil {
-		t.Fatal("want error for malformed url")
+// Close must leave the shared client usable: the process closes it itself.
+func TestClose_KeepsSharedClientOpen(t *testing.T) {
+	rdb, err := pbredis.New("redis://127.0.0.1:1/0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rdb.Close()
+	if err := New(rdb).Close(); err != nil {
+		t.Fatalf("Close = %v, want nil", err)
+	}
+	// A closed go-redis client reports redis.ErrClosed; an open one just fails to dial.
+	if err := rdb.Ping(context.Background()).Err(); errors.Is(err, goredis.ErrClosed) {
+		t.Fatal("Close closed the shared client")
 	}
 }
 
@@ -46,11 +60,12 @@ func TestEnqueueTranslate_Dedupes(t *testing.T) {
 	}
 	insp := asynq.NewInspector(opt)
 	defer insp.Close()
-	q, err := New(url)
+	rdb, err := pbredis.New(url)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer q.Close()
+	defer rdb.Close()
+	q := New(rdb)
 	ctx := context.Background()
 	probe := fmt.Sprintf("probe-%d", time.Now().UnixNano())
 	t.Cleanup(func() { _ = insp.DeleteTask(QueueTranslate, "translate:"+probe+":p") })
