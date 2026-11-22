@@ -23,14 +23,14 @@ func Providers(ctx context.Context, c *config.Config) ([]llm.Provider, error) {
 	}
 	var gem, cla llm.Provider
 	if c.GeminiAPIKey != "" {
-		g, err := gemini.New(ctx, gemini.Config{APIKey: c.GeminiAPIKey, Model: c.GeminiModelTranslate})
+		g, err := gemini.New(ctx, gemini.Config{APIKey: c.GeminiAPIKey, Model: c.GeminiModelTranslate, PolishModel: c.GeminiModelPolish})
 		if err != nil {
 			return nil, err
 		}
 		gem = g
 	}
 	if c.AnthropicAPIKey != "" {
-		cla = claude.New(claude.Config{APIKey: c.AnthropicAPIKey, Model: c.ClaudeModelTranslate})
+		cla = claude.New(claude.Config{APIKey: c.AnthropicAPIKey, Model: c.ClaudeModelTranslate, PolishModel: c.ClaudeModelPolish})
 	}
 	order := []llm.Provider{gem, cla}
 	if c.AIPrimary == "claude" {
@@ -57,12 +57,18 @@ func ZeroCost(c *config.Config) map[string]bool {
 	return z
 }
 
-// Prices lists configured model prices for the gateway: the paid Gemini
-// model when GEMINI_PRICE_* are set. Other models use llm's built-in table.
+// Prices lists configured model prices for the gateway: both paid Gemini
+// models (translate and polish) when GEMINI_PRICE_* are set. Other models use
+// llm's built-in table.
 func Prices(c *config.Config) map[string]llm.Price {
 	p := map[string]llm.Price{}
-	if c.GeminiPriceSet && c.GeminiModelTranslate != "" {
-		p[c.GeminiModelTranslate] = llm.Price{InPerM: c.GeminiPriceInMicros, OutPerM: c.GeminiPriceOutMicros}
+	if !c.GeminiPriceSet {
+		return p
+	}
+	for _, m := range []string{c.GeminiModelTranslate, c.GeminiModelPolish} {
+		if m != "" {
+			p[m] = llm.Price{InPerM: c.GeminiPriceInMicros, OutPerM: c.GeminiPriceOutMicros}
+		}
 	}
 	return p
 }

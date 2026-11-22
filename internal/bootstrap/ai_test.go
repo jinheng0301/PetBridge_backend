@@ -62,3 +62,12 @@ func TestPrices(t *testing.T) {
 		t.Fatalf("unset: %v", p)
 	}
 }
+
+func TestPrices_CoversPolishModel(t *testing.T) {
+	c := &config.Config{GeminiModelTranslate: "gemini-t", GeminiModelPolish: "gemini-p", GeminiPriceSet: true, GeminiPriceInMicros: 1, GeminiPriceOutMicros: 2}
+	p := Prices(c)
+	want := llm.Price{InPerM: 1, OutPerM: 2}
+	if len(p) != 2 || p["gemini-t"] != want || p["gemini-p"] != want {
+		t.Fatalf("prices: %v", p)
+	}
+}

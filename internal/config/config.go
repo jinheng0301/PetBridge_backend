@@ -43,12 +43,16 @@ type Config struct {
 	AIPrimary               string // gemini | claude: which provider is tried first in live mode
 	GeminiAPIKey            string
 	GeminiModelTranslate    string
+	GeminiModelPolish       string
 	GeminiFreeTier          bool  // Gemini free tier: its cost is recorded as 0
 	GeminiPriceSet          bool  // both GEMINI_PRICE_* vars are set
 	GeminiPriceInMicros     int64 // GEMINI_PRICE_IN_USD_PER_M in micro-USD per million tokens
 	GeminiPriceOutMicros    int64 // GEMINI_PRICE_OUT_USD_PER_M in micro-USD per million tokens
 	AnthropicAPIKey         string
 	ClaudeModelTranslate    string
+	ClaudeModelPolish       string
+	AIPolishEnabled         bool // AI_POLISH_ENABLED: master switch for polishing
+	AIPolishDailyQuota      int  // AI_POLISH_DAILY_QUOTA: per user per local day; >= 0
 	FakeAILatency           time.Duration
 	FakeAIFailRate          float64 // 0..1, fake-primary
 	FakeAISecondaryFailRate float64 // 0..1, fake-secondary
@@ -167,8 +171,20 @@ func Load(getenv func(string) string) (*Config, error) {
 	oneOf("AI_PRIMARY", c.AIPrimary, "gemini", "claude")
 	c.GeminiAPIKey = get("GEMINI_API_KEY", "")
 	c.GeminiModelTranslate = get("GEMINI_MODEL_TRANSLATE", "")
+	c.GeminiModelPolish = get("GEMINI_MODEL_POLISH", "")
 	c.AnthropicAPIKey = get("ANTHROPIC_API_KEY", "")
 	c.ClaudeModelTranslate = get("CLAUDE_MODEL_TRANSLATE", "claude-haiku-5-5")
+	c.ClaudeModelPolish = get("CLAUDE_MODEL_POLISH", "claude-haiku-5-5")
+	polishOn, err := strconv.ParseBool(get("AI_POLISH_ENABLED", "true"))
+	if err != nil {
+		add("AI_POLISH_ENABLED must be true or false")
+	}
+	c.AIPolishEnabled = polishOn
+	quota, err := strconv.Atoi(get("AI_POLISH_DAILY_QUOTA", "30"))
+	if err != nil || quota < 0 || quota > 10000 {
+		add("AI_POLISH_DAILY_QUOTA must be an integer between 0 and 10000")
+	}
+	c.AIPolishDailyQuota = quota
 	freeTier, err := strconv.ParseBool(get("GEMINI_FREE_TIER", "true"))
 	if err != nil {
 		add("GEMINI_FREE_TIER must be true or false")
@@ -190,6 +206,9 @@ func Load(getenv func(string) string) (*Config, error) {
 	inMicros, inSet := price("GEMINI_PRICE_IN_USD_PER_M")
 	outMicros, outSet := price("GEMINI_PRICE_OUT_USD_PER_M")
 	c.GeminiPriceSet = inSet && outSet
+	if inSet != outSet {
+		add("GEMINI_PRICE_IN_USD_PER_M and GEMINI_PRICE_OUT_USD_PER_M must be set together")
+	}
 	if c.GeminiPriceSet {
 		c.GeminiPriceInMicros, c.GeminiPriceOutMicros = inMicros, outMicros
 	}
@@ -253,6 +272,9 @@ func Load(getenv func(string) string) (*Config, error) {
 		if c.GeminiAPIKey != "" && c.GeminiModelTranslate == "" {
 			add("GEMINI_MODEL_TRANSLATE is required when GEMINI_API_KEY is set")
 		}
+		if c.GeminiAPIKey != "" && c.GeminiModelPolish == "" {
+			add("GEMINI_MODEL_POLISH is required when GEMINI_API_KEY is set")
+		}
 		if c.AIPrimary == "claude" && c.AnthropicAPIKey == "" {
 			add("ANTHROPIC_API_KEY is required when AI_PROVIDER=live and AI_PRIMARY=claude")
 		}
@@ -268,6 +290,9 @@ func Load(getenv func(string) string) (*Config, error) {
 		if c.AppEnv == "production" && claudeOnChain {
 			if _, _, ok := llm.PriceMicros(c.ClaudeModelTranslate); !ok {
 				add("CLAUDE_MODEL_TRANSLATE must be a model with a known price when APP_ENV=production")
+			}
+			if _, _, ok := llm.PriceMicros(c.ClaudeModelPolish); !ok {
+				add("CLAUDE_MODEL_POLISH must be a model with a known price when APP_ENV=production")
 			}
 		}
 	}
