@@ -35,6 +35,11 @@ tasks:
     cmds:
       - go run ./cmd/worker
 
+  polisheval:
+    desc: "Run the polish eval set against one provider, e.g. task polisheval -- -provider claude -lang zh-Hans -n 10"
+    cmds:
+      - go run ./cmd/tools/polisheval {{.CLI_ARGS}}
+
   test:
     desc: Unit tests (no external services)
     cmds:
