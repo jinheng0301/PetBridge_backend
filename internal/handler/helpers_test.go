@@ -78,8 +78,14 @@ type app struct {
 }
 
 // newApp builds the full router. counter backs both the join guard and the
-// login limit; nil means a fresh in-process counter.
+// login limit; nil means a fresh in-process counter. Polishing allows 30 a day.
 func newApp(t *testing.T, counter ratelimit.Counter) *app {
+	t.Helper()
+	return newAppQuota(t, counter, 30)
+}
+
+// newAppQuota is newApp with a chosen daily polish quota.
+func newAppQuota(t *testing.T, counter ratelimit.Counter, polishDaily int) *app {
 	t.Helper()
 	authSvc, userSvc, iss, pool := newServices(t)
 	if counter == nil {
@@ -101,7 +107,9 @@ func newApp(t *testing.T, counter ratelimit.Counter) *app {
 	inline := service.NewInlinePool(1, func(context.Context, string) error { return nil }, quiet)
 	chatSvc := service.NewChatService(repository.NewTxManager(pool), users, repository.NewRoomMemberRepo(pool),
 		repository.NewMessageRepo(pool), service.PassModerator{}, nopQueue{}, inline, service.NopPublisher{},
-		time.Now, quiet)
+		time.Now, quiet).
+		WithPolish(service.NewQuotaService(ratelimit.NewPolishGuard(counter, 6, polishDaily), nopMeter{},
+			service.QuotaConfig{Enabled: true, DailyBudgetMicros: 5_000_000}, time.Now), nopQueue{})
 	r := server.NewRouter(logger.New("debug", logs), handler.NewHealthHandler(okProbe, okProbe),
 		handler.NewAuthHandler(authSvc, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
 			WithLoginLimit(middleware.RateLimitIP(counter, "login", 10, time.Minute)),

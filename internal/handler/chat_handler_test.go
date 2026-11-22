@@ -11,6 +11,13 @@ import (
 type nopQueue struct{}
 
 func (nopQueue) EnqueueTranslate(context.Context, string, string) error { return nil }
+func (nopQueue) EnqueuePolish(context.Context, string, string) error    { return nil }
+
+// nopMeter reports no AI spend.
+type nopMeter struct{}
+
+func (nopMeter) Add(context.Context, string, int64) error     { return nil }
+func (nopMeter) Total(context.Context, string) (int64, error) { return 0, nil }
 
 func msgPath(roomID string) string { return "/api/v1/rooms/" + roomID + "/messages" }
 

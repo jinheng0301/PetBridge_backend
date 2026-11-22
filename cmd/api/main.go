@@ -144,20 +144,29 @@ func main() {
 		log.Error("ai providers unavailable", "error", err.Error())
 		os.Exit(1)
 	}
-	gw := service.NewAIGateway(providers, aistore.NewCache(rdb),
-		aistore.NewCostMeter(rdb, newFallbackLogger(log, "redis unavailable, ai cost meter uses local counters", 30*time.Second, time.Now)),
+	// One meter for the gateway and the polish quota, so both see the same spend.
+	meter := aistore.NewCostMeter(rdb, newFallbackLogger(log, "redis unavailable, ai cost meter uses local counters", 30*time.Second, time.Now))
+	gw := service.NewAIGateway(providers, aistore.NewCache(rdb), meter,
 		service.GatewayConfig{
 			TranslateTimeout:  3 * time.Second,
+			PolishTimeout:     6 * time.Second,
 			MaxConcurrent:     16,
 			DailyBudgetMicros: cfg.AIDailyBudgetMicros,
 			ZeroCost:          bootstrap.ZeroCost(cfg),
 			Prices:            bootstrap.Prices(cfg),
 		}, time.Now, log)
 	msgs := repository.NewMessageRepo(pool)
-	translation := service.NewTranslationService(msgs, members, gw, service.PassModerator{}, pub, time.Now, log)
-	inline := service.NewInlinePool(4, translation.Process, log)
 	q := queue.New(rdb) // shares rdb's fail-fast timeouts; rdb is closed above
-	chatSvc := service.NewChatService(tx, users, members, msgs, service.PassModerator{}, q, inline, pub, time.Now, log)
+	// Inline translations also record usage and hand finished rows to the polish queue.
+	translation := service.NewTranslationService(msgs, members, gw, service.PassModerator{}, pub, time.Now, log).
+		WithUsage(repository.NewAIUsageRepo(pool)).WithPolishQueue(q)
+	inline := service.NewInlinePool(4, translation.Process, log)
+	// Polish quota: 6 a minute and AI_POLISH_DAILY_QUOTA a local day per user, in the same
+	// Redis-with-fallback counter as the other limits; refused once today's spend reaches the budget.
+	quota := service.NewQuotaService(ratelimit.NewPolishGuard(counter, 6, cfg.AIPolishDailyQuota), meter,
+		service.QuotaConfig{Enabled: cfg.AIPolishEnabled, DailyBudgetMicros: cfg.AIDailyBudgetMicros}, time.Now)
+	chatSvc := service.NewChatService(tx, users, members, msgs, service.PassModerator{}, q, inline, pub, time.Now, log).
+		WithPolish(quota, q)
 	chatHandler := handler.NewChatHandler(chatSvc, authn,
 		middleware.RateLimitUser(counter, "msg", 20, time.Minute),
 		middleware.RateLimitUser(counter, "msgday", 1000, 24*time.Hour))

@@ -403,9 +403,12 @@ paths:
         1 to 500 characters; a phrase message sends `phrase_id` instead and is never sent to AI. A dm
         (`scope` dm) needs `to_user_id`, another seated member, and both must be adults (else 403
         AGE_RESTRICTED). Idempotent on `client_msg_id`: replaying one returns the stored message and
-        sends no events. `polish` is accepted but has no effect until B5b (`polish_requested` stays
-        false). Receivers get `message.new` at once and `message.translated` when their translation
-        lands. Limited to 20 messages per minute and 1000 per day per user (429 RATE_LIMITED).
+        sends no events and charges no polish. `polish` (text only) asks for every receiver's copy to be
+        re-toned for the receiver's MBTI at one charge to the sender's daily polish quota; when the quota,
+        the minute limit or the global budget refuses it the message is still sent with
+        `polish_requested` false. Very short text is polished for free (the polished text equals the
+        base text). Receivers get `message.new` at once, `message.translated` when their translation
+        lands and `message.polished` when their polish ends. Limited to 20 messages per minute and 1000 per day per user (429 RATE_LIMITED).
         Invalid fields are 400 VALIDATION_FAILED with `error.details.fields`.
       security: [{ bearerAuth: [] }]
       parameters:
@@ -462,6 +465,39 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
         '404': { $ref: '#/components/responses/RoomNotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/deliveries/{id}/polish:
+    post:
+      operationId: polishDelivery
+      tags: [messages]
+      summary: Polish my copy of a message
+      description: >
+        The receiver's polish button. Only the delivery's receiver, still seated in the room, may call it
+        (else 404 DELIVERY_NOT_FOUND). Charges one polish to the caller and returns the view with
+        `polish_status` pending; `message.polished` follows when it ends (done, or fallback when the
+        model broke a rule or every provider failed). Calling it again, or for a copy already polished,
+        returns the current view and charges nothing. A phrase message or a translation that is not done
+        yet is 409 POLISH_NOT_READY. Very short text ends done at once and is free. A refused charge is
+        429 QUOTA_EXCEEDED with `error.details.reason` daily_quota, minute_limit (with Retry-After),
+        global_budget or disabled.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '202':
+          description: The caller's view of the message
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/MessageView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '404': { $ref: '#/components/responses/DeliveryNotFound' }
+        '409': { $ref: '#/components/responses/PolishNotReady' }
+        '429': { $ref: '#/components/responses/QuotaExceeded' }
         '500': { $ref: '#/components/responses/Internal' }
   /api/v1/codes:
     get:
@@ -621,6 +657,28 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
+    DeliveryNotFound:
+      description: DELIVERY_NOT_FOUND. No such delivery, it is not the caller's, or the caller left the room.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PolishNotReady:
+      description: POLISH_NOT_READY. A phrase message, or the translation is not done yet.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    QuotaExceeded:
+      description: >
+        QUOTA_EXCEEDED. error.details.reason is daily_quota (the caller's quota for their local day is
+        used up), minute_limit (6 a minute; wait for Retry-After), global_budget (today's AI budget is
+        spent) or disabled (polishing is switched off).
+      headers:
+        Retry-After:
+          description: Seconds until the minute limit lifts (minute_limit only).
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
     TooManyRequests:
       description: >
         RATE_LIMITED (too many requests from this IP or user; wait for the Retry-After header) or
@@ -669,20 +727,25 @@ components:
                 One of NOT_READY, INTERNAL, UNAUTHORIZED, VALIDATION_FAILED, ACCOUNT_DISABLED,
                 REFRESH_INVALID, REFRESH_REUSED, PROVIDER_NOT_CONFIGURED, ONBOARDING_REQUIRED,
                 CODE_INVALID, ROOM_FULL, ALREADY_MEMBER, ROOM_LIMIT, AGE_RESTRICTED, CODE_COOLDOWN,
-                RATE_LIMITED.
+                RATE_LIMITED, DELIVERY_NOT_FOUND, POLISH_NOT_READY, QUOTA_EXCEEDED.
             message: { type: string, description: 'For debugging only; localise by code.' }
             request_id: { type: string }
             details:
               type: object
               description: >
                 fields on VALIDATION_FAILED from onboarding and messages; room_id on ALREADY_MEMBER;
-                retry_after_seconds on CODE_COOLDOWN.
+                retry_after_seconds on CODE_COOLDOWN; reason on CODE_ISSUE_LIMIT and QUOTA_EXCEEDED.
               properties:
                 fields:
                   type: array
                   items: { type: string }
                 room_id: { type: string, format: uuid }
                 retry_after_seconds: { type: integer, minimum: 1 }
+                reason:
+                  type: string
+                  description: >
+                    CODE_ISSUE_LIMIT: room_full, enough_unused, daily_limit, lifetime_limit.
+                    QUOTA_EXCEEDED: daily_quota, minute_limit, global_budget, disabled.
     IDTokenRequest:
       type: object
       required: [id_token]
@@ -865,7 +928,7 @@ components:
         phrase_id: { type: string, description: 'Required for kind phrase; an id from GET /config/phrases.', example: good_morning }
         scope: { type: string, enum: [room, dm], default: room }
         to_user_id: { type: string, format: uuid, description: 'Required for scope dm.' }
-        polish: { type: boolean, default: false, description: 'Text only; no effect until B5b.' }
+        polish: { type: boolean, default: false, description: 'Text only; polish every receiver''s copy at one charge to the sender.' }
     SenderInfo:
       type: object
       required: [user_id, nickname, pet_type]
@@ -900,7 +963,7 @@ components:
         src_lang: { type: string, enum: [ja, ko, zh-Hant, zh-Hans, en], description: "The sender's native_lang." }
         text: { type: string, description: "The original text (a phrase in the sender's language)." }
         client_msg_id: { type: string, nullable: true, description: "Only in the sender's own view." }
-        polish_requested: { type: boolean }
+        polish_requested: { type: boolean, description: 'The sender asked for polish and it was accepted (false when the quota refused it).' }
         created_at: { type: string, format: date-time }
         delivery:
           allOf: [{ $ref: '#/components/schemas/DeliveryView' }]

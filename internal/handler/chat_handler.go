@@ -11,7 +11,7 @@ import (
 	"github.com/jinheng0301/petbridge/internal/service"
 )
 
-// ChatHandler serves sending and listing room messages (backend TRD 7.4).
+// ChatHandler serves sending and listing room messages and the polish button (backend TRD 7.4).
 type ChatHandler struct {
 	chat   *service.ChatService
 	authn  gin.HandlerFunc
@@ -29,6 +29,16 @@ func (h *ChatHandler) Routes(v1 *gin.RouterGroup) {
 	send := append(append([]gin.HandlerFunc{}, h.limits...), h.send)
 	g.POST("", send...)
 	g.GET("", h.list)
+	v1.POST("/deliveries/:id/polish", h.authn, h.polish)
+}
+
+func (h *ChatHandler) polish(c *gin.Context) {
+	v, err := h.chat.Polish(c.Request.Context(), UserID(c), c.Param("id"))
+	if err != nil {
+		failChat(c, err)
+		return
+	}
+	OK(c, http.StatusAccepted, v)
 }
 
 func (h *ChatHandler) send(c *gin.Context) {
@@ -59,7 +69,7 @@ func (h *ChatHandler) list(c *gin.Context) {
 	q := model.PageQuery{Before: c.Query("before"), After: c.Query("after")}
 	if s := c.Query("limit"); s != "" {
 		n, err := strconv.Atoi(s)
-		if err != nil {
+		if err != nil || n < 1 {
 			failChat(c, &service.ValidationError{Fields: []string{"limit"}})
 			return
 		}
@@ -76,12 +86,23 @@ func (h *ChatHandler) list(c *gin.Context) {
 	OK(c, http.StatusOK, page)
 }
 
-// failChat maps validation errors to 400 with details.fields; the rest go to failRoom.
+// failChat maps validation, delivery and quota errors; the rest go to failRoom.
 func failChat(c *gin.Context, err error) {
 	var ve *service.ValidationError
-	if errors.As(err, &ve) {
+	var qe *service.QuotaError
+	switch {
+	case errors.As(err, &ve):
 		FailDetails(c, http.StatusBadRequest, model.CodeValidationFailed, "invalid fields", gin.H{"fields": ve.Fields})
-		return
+	case errors.Is(err, service.ErrDeliveryNotFound):
+		Fail(c, http.StatusNotFound, model.CodeDeliveryNotFound, "delivery not found")
+	case errors.Is(err, service.ErrPolishNotReady):
+		Fail(c, http.StatusConflict, model.CodePolishNotReady, "this message cannot be polished yet")
+	case errors.As(err, &qe):
+		if qe.Reason == service.QuotaMinuteLimit {
+			c.Header("Retry-After", strconv.Itoa(RetrySeconds(qe.RetryAfter)))
+		}
+		FailDetails(c, http.StatusTooManyRequests, model.CodeQuotaExceeded, "polish quota exceeded", gin.H{"reason": qe.Reason})
+	default:
+		failRoom(c, err)
 	}
-	failRoom(c, err)
 }

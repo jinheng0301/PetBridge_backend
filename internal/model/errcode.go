@@ -28,6 +28,10 @@ const (
 	CodeNotRoomOwner       = "NOT_ROOM_OWNER"
 	CodeOwnerCannotLeave   = "OWNER_CANNOT_LEAVE"
 	CodeCodeIssueLimit     = "CODE_ISSUE_LIMIT"
+
+	CodeDeliveryNotFound = "DELIVERY_NOT_FOUND"
+	CodePolishNotReady   = "POLISH_NOT_READY"
+	CodeQuotaExceeded    = "QUOTA_EXCEEDED"
 )
 
 // ErrNotFound is returned by repositories when a row does not exist.

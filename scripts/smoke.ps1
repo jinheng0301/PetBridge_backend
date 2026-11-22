@@ -1,5 +1,5 @@
 # Smoke test: /healthz must return 200 and /readyz must report status ok, then (when dev login is
-# enabled) login -> onboarding -> GET /me. then (B3) a second user joins the first user's room, then (B5a) the owner sends a message the second user lists, then (B3b) the second user leaves, and the owner issues a code and dissolves.
+# enabled) login -> onboarding -> GET /me. then (B3) a second user joins the first user's room, then (B5a) the owner sends a message the second user lists, then (B5b) both polish entry points end in done or fallback, then (B3b) the second user leaves, and the owner issues a code and dissolves.
 $ErrorActionPreference = 'Stop'
 
 # Port: APP_PORT from the environment, else from .env, else 8080.
@@ -106,6 +106,54 @@ try {
     Write-Host "OK message send -> list (message=$($sent.id), translation_status=$status)"
 } catch {
     Write-Host "FAIL message flow: $($_.Exception.Message)"
+    exit 1
+}
+
+# B5b flow: the owner sends with the polish toggle on; the second user presses polish on another
+# message once its translation is done, and both polishes end in done or fallback.
+try {
+    $waitDelivery = {
+        param($messageId, $field, [string[]]$want)
+        for ($i = 0; $i -lt 20; $i++) {
+            $page = Invoke-RestMethod -Method Get -Uri "$base/rooms/$msgRoom/messages" -Headers $headers2 -TimeoutSec 5
+            $m = @($page.data.items) | Where-Object { $_.id -eq $messageId }
+            if ($m -and ($want -contains $m.delivery.$field)) { return $m.delivery }
+            Start-Sleep -Milliseconds 500
+        }
+        return $null
+    }
+    $pBody = @{ client_msg_id = [guid]::NewGuid().ToString(); kind = 'text'; text = 'See you at the station at 7, bring the tickets'; polish = $true } | ConvertTo-Json
+    $pSend = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/rooms/$msgRoom/messages" -ContentType 'application/json; charset=utf-8' `
+        -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($pBody)) -TimeoutSec 5
+    $pSent = ($pSend.Content | ConvertFrom-Json).data
+    if ($pSend.StatusCode -ne 202 -or -not $pSent.polish_requested) {
+        Write-Host "FAIL polish toggle: status $($pSend.StatusCode), polish_requested $($pSent.polish_requested)"
+        exit 1
+    }
+    $d1 = & $waitDelivery $pSent.id 'polish_status' @('done', 'fallback')
+    if (-not $d1) {
+        Write-Host "FAIL polish toggle: polish did not end within 10s (is the worker running?)"
+        exit 1
+    }
+
+    $d2 = & $waitDelivery $sent.id 'translation_status' @('done')
+    if (-not $d2) {
+        Write-Host "FAIL polish button: translation of $($sent.id) not done within 10s"
+        exit 1
+    }
+    $btn = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/deliveries/$($d2.id)/polish" -Headers $headers2 -TimeoutSec 5
+    if ($btn.StatusCode -ne 202) {
+        Write-Host "FAIL polish button: status $($btn.StatusCode), want 202"
+        exit 1
+    }
+    $d3 = & $waitDelivery $sent.id 'polish_status' @('done', 'fallback')
+    if (-not $d3) {
+        Write-Host "FAIL polish button: polish did not end within 10s"
+        exit 1
+    }
+    Write-Host "OK polish (toggle=$($d1.polish_status), button=$($d3.polish_status))"
+} catch {
+    Write-Host "FAIL polish flow: $($_.Exception.Message)"
     exit 1
 }
 
