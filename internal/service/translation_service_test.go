@@ -22,14 +22,15 @@ type fakeTranslator struct {
 	calls []llm.TranslateRequest
 }
 
-func (f *fakeTranslator) Translate(_ context.Context, req llm.TranslateRequest) (string, string, error) {
+func (f *fakeTranslator) Translate(_ context.Context, req llm.TranslateRequest) (AIOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, req)
 	if f.err != nil {
-		return "", "", f.err
+		return AIOutcome{}, f.err
 	}
-	return req.TgtLang + ":" + req.Text, llm.RiskNone, nil
+	return AIOutcome{Text: req.TgtLang + ":" + req.Text, Risk: llm.RiskNone, Calls: 1,
+		Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}, CostMicros: 3}, nil
 }
 
 func (f *fakeTranslator) setErr(err error) {

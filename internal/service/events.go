@@ -16,6 +16,7 @@ const (
 	EventPetAction         = "pet.action"
 	EventMessageNew        = "message.new"
 	EventMessageTranslated = "message.translated"
+	EventMessagePolished   = "message.polished"
 )
 
 // EventKind decides how an event is numbered and routed.

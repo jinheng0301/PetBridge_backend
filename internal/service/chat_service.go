@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jinheng0301/petbridge/internal/model"
+	"github.com/jinheng0301/petbridge/pkg/llm"
 )
 
 // Message limits (spec 5.1, 5.2).
@@ -27,8 +29,8 @@ const enqueueTimeout = 1 * time.Second
 
 var clientMsgIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// SendInput is the body of POST /rooms/{id}/messages. Polish is accepted but
-// ignored until B5b; polish_requested is always false in B5a.
+// SendInput is the body of POST /rooms/{id}/messages. Polish (text only) asks
+// for every receiver's copy to be polished at the sender's cost (spec 5.7).
 type SendInput struct {
 	ClientMsgID, Kind, Text, PhraseID, Scope, ToUserID string
 	Polish                                             bool
@@ -44,8 +46,21 @@ type ChatService struct {
 	q       TranslateQueue
 	inline  *InlinePool
 	pub     Publisher
+	quota   PolishQuota // nil until WithPolish: polish requests are ignored
+	pq      PolishQueue
 	now     func() time.Time
 	log     *slog.Logger
+}
+
+// PolishQuota charges one polish to a user; *QuotaService implements it.
+type PolishQuota interface {
+	TakePolish(ctx context.Context, userID string, tz *string) error
+}
+
+// WithPolish turns on both polish entry points (spec 5.7).
+func (s *ChatService) WithPolish(quota PolishQuota, pq PolishQueue) *ChatService {
+	s.quota, s.pq = quota, pq
+	return s
 }
 
 func NewChatService(tx TxRunner, users UserStore, members RoomMemberStore, msgs MessageStore, mod Moderator,
@@ -113,6 +128,19 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 		}
 	}
 
+	// A replay returns the stored message before anything is charged (spec 5.2).
+	// Two concurrent first sends may both pass this check; the insert below
+	// keeps one message, and at most one extra polish is charged.
+	if id, err := s.msgs.FindByClientMsgID(ctx, userID, in.ClientMsgID); err == nil {
+		views, err := s.msgs.ViewsOf(ctx, id)
+		if err != nil {
+			return model.MessageView{}, fmt.Errorf("replay views: %w", err)
+		}
+		return views.Sender, nil
+	} else if !errors.Is(err, model.ErrNotFound) {
+		return model.MessageView{}, fmt.Errorf("find replay: %w", err)
+	}
+
 	verdict, err := s.mod.CheckOutgoing(ctx, body, srcLang)
 	if err != nil {
 		return model.MessageView{}, fmt.Errorf("moderate outgoing: %w", err)
@@ -126,9 +154,17 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 	if err != nil {
 		return model.MessageView{}, fmt.Errorf("message id: %w", err)
 	}
+	polishOn, err := s.senderPolish(ctx, userID, prof.TZ, in, body)
+	if err != nil {
+		return model.MessageView{}, err
+	}
 	m := model.NewMessage{ID: id.String(), RoomID: roomID, SenderID: userID, Scope: in.Scope, ToUserID: toUser,
-		Kind: in.Kind, PhraseID: phraseID, SrcLang: srcLang, Body: body, ClientMsgID: in.ClientMsgID}
-	ds := deliveriesFor(m, receivers)
+		Kind: in.Kind, PhraseID: phraseID, SrcLang: srcLang, Body: body, ClientMsgID: in.ClientMsgID, PolishRequested: polishOn}
+	var polishBy *string
+	if polishOn {
+		polishBy = &userID
+	}
+	ds := deliveriesFor(m, receivers, polishBy)
 
 	var replayID string
 	err = s.tx.WithTx(ctx, func(ctx context.Context) error {
@@ -182,7 +218,124 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 			}
 		}
 	}
+	if polishOn {
+		for _, r := range receivers {
+			if v, ok := views.Receivers[r.UserID]; ok && v.Delivery != nil &&
+				v.Delivery.TranslationStatus == model.TranslationDone && v.Delivery.PolishStatus == model.PolishPending {
+				s.enqueuePolish(ctx, v.Delivery.ID)
+			}
+		}
+	}
 	return views.Sender, nil
+}
+
+// senderPolish decides the sender toggle: text only, free for very short
+// text, otherwise one charge to the sender. Running out of quota does not
+// refuse the message (polish_requested=false tells the client why).
+func (s *ChatService) senderPolish(ctx context.Context, userID string, tz *string, in SendInput, body string) (bool, error) {
+	if !in.Polish || in.Kind != model.KindText || s.quota == nil {
+		return false, nil
+	}
+	if llm.TooShortToPolish(body) {
+		return true, nil
+	}
+	err := s.quota.TakePolish(ctx, userID, tz)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrQuotaExceeded):
+		return false, nil
+	default:
+		return false, fmt.Errorf("polish quota: %w", err)
+	}
+}
+
+// enqueuePolish hands one polish to the queue; a failure leaves it pending
+// for the sweep (no in-process polishing).
+func (s *ChatService) enqueuePolish(ctx context.Context, deliveryID string) {
+	ectx, cancel := context.WithTimeout(ctx, enqueueTimeout)
+	defer cancel()
+	if err := s.pq.EnqueuePolish(ectx, deliveryID, ""); err != nil {
+		s.log.Warn("polish left for the sweep: enqueue failed", "delivery_id", deliveryID, "err", err)
+	}
+}
+
+// Polish is the receiver's button (POST /deliveries/{id}/polish). The row is
+// claimed and the quota charged in one transaction, so repeated or concurrent
+// taps charge once, and a refused charge leaves the row as it was.
+func (s *ChatService) Polish(ctx context.Context, userID, deliveryID string) (model.MessageView, error) {
+	w, err := s.msgs.PolishWork(ctx, deliveryID)
+	if errors.Is(err, model.ErrNotFound) || (err == nil && w.ReceiverID != userID) {
+		return model.MessageView{}, ErrDeliveryNotFound
+	}
+	if err != nil {
+		return model.MessageView{}, fmt.Errorf("polish work: %w", err)
+	}
+	seated, err := s.members.IsActiveMember(ctx, w.RoomID, userID)
+	if err != nil {
+		return model.MessageView{}, fmt.Errorf("member check: %w", err)
+	}
+	if !seated {
+		return model.MessageView{}, ErrDeliveryNotFound
+	}
+	if w.PolishStatus != model.PolishNone {
+		return s.receiverView(ctx, w.MessageID, userID)
+	}
+	if w.Kind != model.KindText || w.TranslationStatus != model.TranslationDone || w.BaseText == nil || s.quota == nil {
+		return model.MessageView{}, ErrPolishNotReady
+	}
+
+	prof, _, err := s.users.LoadProfile(ctx, userID, false)
+	if err != nil {
+		return model.MessageView{}, fmt.Errorf("load receiver: %w", err)
+	}
+	short := llm.TooShortToPolish(*w.BaseText)
+	// The claim and the charge share one transaction. The claim's row lock
+	// holds a concurrent tap until this one ends: after a commit it sees
+	// pending and returns that; after a refused charge (rolled back) it finds
+	// none and is charged itself. So a tap never reports a pending that is
+	// later undone, and the status only moves forward.
+	now := s.now()
+	claimed := false
+	err = s.tx.WithTx(ctx, func(ctx context.Context) error {
+		ok, err := s.msgs.ClaimPolish(ctx, deliveryID, userID, now)
+		if err != nil {
+			return fmt.Errorf("claim polish: %w", err)
+		}
+		if !ok { // another tap already claimed it
+			return nil
+		}
+		claimed = true
+		if short { // nothing to rewrite: done at once, free
+			if _, err := s.msgs.SetPolish(ctx, deliveryID, w.BaseText, model.PolishDone, now); err != nil {
+				return fmt.Errorf("set polish: %w", err)
+			}
+			return nil
+		}
+		return s.quota.TakePolish(ctx, userID, prof.TZ)
+	})
+	if err != nil {
+		if errors.Is(err, ErrQuotaExceeded) {
+			return model.MessageView{}, err
+		}
+		return model.MessageView{}, fmt.Errorf("polish button: %w", err)
+	}
+	if claimed && !short {
+		s.enqueuePolish(ctx, deliveryID)
+	}
+	return s.receiverView(ctx, w.MessageID, userID)
+}
+
+func (s *ChatService) receiverView(ctx context.Context, messageID, userID string) (model.MessageView, error) {
+	views, err := s.msgs.ViewsOf(ctx, messageID)
+	if err != nil {
+		return model.MessageView{}, fmt.Errorf("message views: %w", err)
+	}
+	v, ok := views.Receivers[userID]
+	if !ok {
+		return model.MessageView{}, ErrDeliveryNotFound
+	}
+	return v, nil
 }
 
 // validateSend normalises in (trimmed text, default scope) and returns the
@@ -214,8 +367,11 @@ func validateSend(in *SendInput) (string, error) {
 	return "", nil
 }
 
-// deliveriesFor decides each receiver's row: done when no AI is needed, else pending.
-func deliveriesFor(m model.NewMessage, receivers []model.Recipient) []model.NewDelivery {
+// deliveriesFor decides each receiver's row: done when no AI is needed, else
+// pending. With polishBy set, every row's polish is pending under polishBy,
+// except a row whose base is already known and too short: that one is done
+// with the base as its polished text.
+func deliveriesFor(m model.NewMessage, receivers []model.Recipient, polishBy *string) []model.NewDelivery {
 	trivial := m.Kind == model.KindText && nothingToTranslate(m.Body)
 	ds := make([]model.NewDelivery, 0, len(receivers))
 	for _, r := range receivers {
@@ -231,6 +387,13 @@ func deliveriesFor(m model.NewMessage, receivers []model.Recipient) []model.NewD
 		}
 		if done {
 			d.BaseText, d.TranslationStatus = &base, model.TranslationDone
+		}
+		if polishBy != nil {
+			d.PolishStatus, d.PolishBy = model.PolishPending, polishBy
+			if done && llm.TooShortToPolish(base) {
+				b := base
+				d.PolishStatus, d.PolishedText = model.PolishDone, &b
+			}
 		}
 		ds = append(ds, d)
 	}

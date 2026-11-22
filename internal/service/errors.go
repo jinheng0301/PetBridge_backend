@@ -25,6 +25,9 @@ var (
 	ErrOwnerCannotLeave  = errors.New("owner cannot leave own room")
 	ErrCannotRemoveOwner = errors.New("cannot remove the room owner")
 
+	ErrDeliveryNotFound = errors.New("delivery not found")
+	ErrPolishNotReady   = errors.New("polish not ready")
+
 	ErrAIUnavailable    = errors.New("ai: every provider failed")
 	ErrAIBudgetExceeded = errors.New("ai: daily hard cap reached")
 )

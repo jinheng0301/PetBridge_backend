@@ -32,22 +32,46 @@ type CostMeter interface {
 
 type GatewayConfig struct {
 	TranslateTimeout  time.Duration // per provider call; 3s
+	PolishTimeout     time.Duration // per provider call; 6s
 	MaxConcurrent     int           // in-flight provider chains per process; 16
-	DailyBudgetMicros int64         // translation stops at 2x this
+	DailyBudgetMicros int64         // polish stops at 1x this, translation at 2x
 	ZeroCost          map[string]bool
 	// Prices are configured per-model prices (model name -> micro-USD per
 	// million tokens), consulted before llm's built-in table.
 	Prices map[string]llm.Price
 }
 
-// Translator returns the translation and the provider's risk verdict ("none"
-// on a cache hit).
-type Translator interface {
-	Translate(ctx context.Context, req llm.TranslateRequest) (text, risk string, err error)
+// AIOutcome is one gateway call's result. It is valid even when err != nil:
+// Calls, Usage and CostMicros record calls already paid for (a polish that
+// broke a rule). Risk is "none" on a cache hit.
+type AIOutcome struct {
+	Text, Risk, Provider, Model string
+	Cached                      bool
+	Calls                       int // provider answers received (money spent)
+	Usage                       llm.Usage
+	CostMicros                  int64
 }
+
+type Translator interface {
+	Translate(ctx context.Context, req llm.TranslateRequest) (AIOutcome, error)
+}
+
+type Polisher interface {
+	Polish(ctx context.Context, req llm.PolishRequest) (AIOutcome, error)
+}
+
+// ErrPolishRejected matches a *PolishRejectedError: the provider answered but
+// broke a rule of backend TRD 10.3.7 (items 2-5).
+var ErrPolishRejected = errors.New("ai: polish broke a rule")
+
+type PolishRejectedError struct{ Check string }
+
+func (e *PolishRejectedError) Error() string        { return "ai: polish broke the " + e.Check + " rule" }
+func (e *PolishRejectedError) Is(target error) bool { return target == ErrPolishRejected }
 
 const (
 	translateCacheTTL = 7 * 24 * time.Hour
+	polishCacheTTL    = 7 * 24 * time.Hour
 
 	breakerInterval    = 60 * time.Second
 	breakerMinRequests = 20
@@ -59,7 +83,7 @@ var breakerOpenTimeout = 30 * time.Second
 
 type gatewayLink struct {
 	p  llm.Provider
-	cb *gobreaker.CircuitBreaker[llm.TranslateResult]
+	cb *gobreaker.CircuitBreaker[llm.Result] // shared by translate and polish
 }
 
 // AIGateway runs the provider chain behind a cache, a per-process concurrency
@@ -75,7 +99,10 @@ type AIGateway struct {
 	warned sync.Map // model name -> struct{}: unknown-price warning already logged
 }
 
-var _ Translator = (*AIGateway)(nil)
+var (
+	_ Translator = (*AIGateway)(nil)
+	_ Polisher   = (*AIGateway)(nil)
+)
 
 // NewAIGateway builds the gateway; providers are tried in order.
 func NewAIGateway(providers []llm.Provider, cache AICache, meter CostMeter, cfg GatewayConfig, now func() time.Time, log *slog.Logger) *AIGateway {
@@ -85,7 +112,7 @@ func NewAIGateway(providers []llm.Provider, cache AICache, meter CostMeter, cfg 
 	}
 	g := &AIGateway{cache: cache, meter: meter, cfg: cfg, now: now, log: log, sem: make(chan struct{}, n)}
 	for _, p := range providers {
-		g.chain = append(g.chain, gatewayLink{p: p, cb: gobreaker.NewCircuitBreaker[llm.TranslateResult](gobreaker.Settings{
+		g.chain = append(g.chain, gatewayLink{p: p, cb: gobreaker.NewCircuitBreaker[llm.Result](gobreaker.Settings{
 			Name:     p.Name(),
 			Interval: breakerInterval,
 			Timeout:  breakerOpenTimeout,
@@ -115,46 +142,80 @@ func TranslateCacheKey(req llm.TranslateRequest) string {
 	return "tr:" + hex.EncodeToString(sum[:]) + ":" + req.SrcLang + ":" + req.TgtLang + ":" + llm.PromptVersion
 }
 
+// PolishCacheKey is po:{sha256hex(normalized base)}:{src}:{tgt}:{MBTI}:{tier}:{PolishPromptVersion}.
+func PolishCacheKey(req llm.PolishRequest) string {
+	sum := sha256.Sum256([]byte(normalizeForCache(req.Text)))
+	return "po:" + hex.EncodeToString(sum[:]) + ":" + req.SrcLang + ":" + req.TgtLang + ":" + req.MBTI + ":" + req.Tier + ":" + llm.PolishPromptVersion
+}
+
 func normalizeForCache(s string) string {
 	// strings.Fields splits on unicode.IsSpace, which drops leading and
 	// trailing whitespace too.
 	return strings.Join(strings.Fields(norm.NFC.String(s)), " ")
 }
 
-func (g *AIGateway) Translate(ctx context.Context, req llm.TranslateRequest) (string, string, error) {
+// Translate runs the chain. A cache hit is served even over budget (it costs
+// nothing); a miss is refused once the day's spend reaches 2x the budget.
+func (g *AIGateway) Translate(ctx context.Context, req llm.TranslateRequest) (AIOutcome, error) {
+	return g.run(ctx, TranslateCacheKey(req), translateCacheTTL, 2*g.cfg.DailyBudgetMicros, g.cfg.TranslateTimeout,
+		func(ctx context.Context, p llm.Provider) (llm.Result, error) { return p.Translate(ctx, req) }, nil)
+}
+
+// Polish runs the chain for one polish. A miss is refused once the day's
+// spend reaches the budget. An answer that breaks a rule of 10.3.7 is paid
+// for, not cached, and not retried on the next provider.
+func (g *AIGateway) Polish(ctx context.Context, req llm.PolishRequest) (AIOutcome, error) {
+	check := func(res llm.Result) string { return llm.CheckPolish(req.Text, res.Text, req.Tier) }
+	return g.run(ctx, PolishCacheKey(req), polishCacheTTL, g.cfg.DailyBudgetMicros, g.cfg.PolishTimeout,
+		func(ctx context.Context, p llm.Provider) (llm.Result, error) { return p.Polish(ctx, req) }, check)
+}
+
+type providerCall func(ctx context.Context, p llm.Provider) (llm.Result, error)
+
+func (g *AIGateway) run(ctx context.Context, key string, ttl time.Duration, limit int64, timeout time.Duration,
+	do providerCall, check func(llm.Result) string) (AIOutcome, error) {
+	if v, ok, err := g.cache.Get(ctx, key); err == nil && ok {
+		return AIOutcome{Text: v, Risk: llm.RiskNone, Cached: true}, nil
+	}
 	day := g.now().UTC().Format("20060102")
 	total, err := g.meter.Total(ctx, day)
 	if err != nil {
 		total = 0
 	}
-	if total >= 2*g.cfg.DailyBudgetMicros {
-		return "", "", ErrAIBudgetExceeded
-	}
-
-	key := TranslateCacheKey(req)
-	if v, ok, err := g.cache.Get(ctx, key); err == nil && ok {
-		return v, llm.RiskNone, nil
+	if total >= limit {
+		return AIOutcome{}, ErrAIBudgetExceeded
 	}
 
 	select {
 	case g.sem <- struct{}{}:
 	case <-ctx.Done():
-		return "", "", ctx.Err()
+		return AIOutcome{}, ctx.Err()
 	}
 	defer func() { <-g.sem }()
 
 	var last error
 	for _, l := range g.chain {
 		if err := ctx.Err(); err != nil {
-			return "", "", err
+			return AIOutcome{}, err
 		}
-		res, err := g.call(ctx, l, req)
+		res, err := g.call(ctx, l, timeout, do)
 		if err == nil {
-			g.record(ctx, key, day, l.p.Name(), res)
-			return res.Text, res.Risk, nil
+			out := AIOutcome{Text: res.Text, Risk: res.Risk, Provider: l.p.Name(), Model: res.Model,
+				Calls: 1, Usage: res.Usage, CostMicros: g.costMicros(l.p.Name(), res)}
+			g.addCost(ctx, day, out.CostMicros)
+			if check != nil {
+				if c := check(res); c != "" {
+					g.log.Warn("polish rejected", "check", c, "provider", l.p.Name())
+					return out, &PolishRejectedError{Check: c}
+				}
+			}
+			if err := g.cache.Set(context.WithoutCancel(ctx), key, res.Text, ttl); err != nil {
+				g.log.Warn("ai cache set failed", "err", err)
+			}
+			return out, nil
 		}
 		if cerr := ctx.Err(); cerr != nil {
-			return "", "", cerr
+			return AIOutcome{}, cerr
 		}
 		class := errorClass(err)
 		if class == "breaker_open" {
@@ -167,21 +228,21 @@ func (g *AIGateway) Translate(ctx context.Context, req llm.TranslateRequest) (st
 	if last == nil {
 		last = errors.New("no provider configured")
 	}
-	return "", "", fmt.Errorf("%w: %w", ErrAIUnavailable, last)
+	return AIOutcome{}, fmt.Errorf("%w: %w", ErrAIUnavailable, last)
 }
 
 // call runs one provider behind its breaker with the per-call timeout. When
 // the caller's ctx has ended the error is marked as context.Canceled so the
 // breaker excludes it; the per-call timeout alone (parent still alive)
 // stays a DeadlineExceeded failure.
-func (g *AIGateway) call(ctx context.Context, l gatewayLink, req llm.TranslateRequest) (llm.TranslateResult, error) {
-	return l.cb.Execute(func() (llm.TranslateResult, error) {
+func (g *AIGateway) call(ctx context.Context, l gatewayLink, timeout time.Duration, do providerCall) (llm.Result, error) {
+	return l.cb.Execute(func() (llm.Result, error) {
 		cctx, cancel := ctx, context.CancelFunc(func() {})
-		if g.cfg.TranslateTimeout > 0 {
-			cctx, cancel = context.WithTimeout(ctx, g.cfg.TranslateTimeout)
+		if timeout > 0 {
+			cctx, cancel = context.WithTimeout(ctx, timeout)
 		}
 		defer cancel()
-		res, err := l.p.Translate(cctx, req)
+		res, err := do(cctx, l.p)
 		if err != nil && ctx.Err() != nil {
 			return res, fmt.Errorf("%w: %w", context.Canceled, err)
 		}
@@ -189,23 +250,18 @@ func (g *AIGateway) call(ctx context.Context, l gatewayLink, req llm.TranslateRe
 	})
 }
 
-// record caches the translation and meters its cost. Both outlive the caller:
-// the money is spent once the provider answered.
-func (g *AIGateway) record(ctx context.Context, key, day, provider string, res llm.TranslateResult) {
-	bg := context.WithoutCancel(ctx)
-	if err := g.cache.Set(bg, key, res.Text, translateCacheTTL); err != nil {
-		g.log.Warn("ai cache set failed", "err", err)
-	}
-	micros := g.costMicros(provider, res)
+// meter_ adds the cost; it outlives the caller (the money is spent once the
+// provider answered).
+func (g *AIGateway) addCost(ctx context.Context, day string, micros int64) {
 	if micros <= 0 {
 		return
 	}
-	if err := g.meter.Add(bg, day, micros); err != nil {
+	if err := g.meter.Add(context.WithoutCancel(ctx), day, micros); err != nil {
 		g.log.Warn("ai cost add failed", "err", err)
 	}
 }
 
-func (g *AIGateway) costMicros(provider string, res llm.TranslateResult) int64 {
+func (g *AIGateway) costMicros(provider string, res llm.Result) int64 {
 	if g.cfg.ZeroCost[provider] {
 		return 0
 	}

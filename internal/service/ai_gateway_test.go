@@ -26,14 +26,18 @@ type gwProvider struct {
 	err   error         // returned when non-nil
 	sleep time.Duration // honours ctx while sleeping
 
+	polishText string // Polish answer; "" = req.Text + "呀"
+	polishErr  error
+
 	calls    atomic.Int64
+	pcalls   atomic.Int64
 	inFlight atomic.Int64
 	maxSeen  atomic.Int64
 }
 
 func (p *gwProvider) Name() string { return p.name }
 
-func (p *gwProvider) Translate(ctx context.Context, req llm.TranslateRequest) (llm.TranslateResult, error) {
+func (p *gwProvider) Translate(ctx context.Context, req llm.TranslateRequest) (llm.Result, error) {
 	p.calls.Add(1)
 	n := p.inFlight.Add(1)
 	defer p.inFlight.Add(-1)
@@ -47,13 +51,39 @@ func (p *gwProvider) Translate(ctx context.Context, req llm.TranslateRequest) (l
 		select {
 		case <-time.After(p.sleep):
 		case <-ctx.Done():
-			return llm.TranslateResult{}, ctx.Err()
+			return llm.Result{}, ctx.Err()
 		}
 	}
 	if p.err != nil {
-		return llm.TranslateResult{}, p.err
+		return llm.Result{}, p.err
 	}
-	return llm.TranslateResult{Text: p.name + ":" + req.Text, Risk: llm.RiskReview, Model: p.model, Usage: p.usage}, nil
+	return llm.Result{Text: p.name + ":" + req.Text, Risk: llm.RiskReview, Model: p.model, Usage: p.usage}, nil
+}
+
+// Polish returns polishText (default: req.Text + "呀") unless polishErr is set.
+func (p *gwProvider) Polish(ctx context.Context, req llm.PolishRequest) (llm.Result, error) {
+	p.pcalls.Add(1)
+	if p.sleep > 0 {
+		select {
+		case <-time.After(p.sleep):
+		case <-ctx.Done():
+			return llm.Result{}, ctx.Err()
+		}
+	}
+	if p.polishErr != nil {
+		return llm.Result{}, p.polishErr
+	}
+	text := p.polishText
+	if text == "" {
+		text = req.Text + "呀"
+	}
+	return llm.Result{Text: text, Risk: llm.RiskNone, Model: p.model, Usage: p.usage}, nil
+}
+
+// tr3 adapts the gateway's outcome to the (text, risk, err) shape the B5a tests use.
+func tr3(g *AIGateway, ctx context.Context, req llm.TranslateRequest) (string, string, error) {
+	o, err := g.Translate(ctx, req)
+	return o.Text, o.Risk, err
 }
 
 type gwCache struct {
@@ -126,7 +156,7 @@ func TestGateway_PrimaryThenSecondary(t *testing.T) {
 	p := &gwProvider{name: "fake-primary", err: errors.New("boom")}
 	s := &gwProvider{name: "fake-secondary"}
 	g := newTestGateway(gwConfig(), newGWCache(), newGWMeter(), log, p, s)
-	text, risk, err := g.Translate(context.Background(), gwReq("secret words"))
+	text, risk, err := tr3(g, context.Background(), gwReq("secret words"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +178,7 @@ func TestGateway_FallsBackOnBadOutput(t *testing.T) {
 	p := &gwProvider{name: "fake-primary", err: llm.ErrBadOutput}
 	s := &gwProvider{name: "fake-secondary"}
 	g := newTestGateway(gwConfig(), newGWCache(), newGWMeter(), nil, p, s)
-	text, _, err := g.Translate(context.Background(), gwReq("hi"))
+	text, _, err := tr3(g, context.Background(), gwReq("hi"))
 	if err != nil || text != "fake-secondary:hi" {
 		t.Fatalf("got %q, %v", text, err)
 	}
@@ -158,7 +188,7 @@ func TestGateway_AllFail(t *testing.T) {
 	p := &gwProvider{name: "fake-primary", err: llm.ErrRateLimited}
 	s := &gwProvider{name: "fake-secondary", err: llm.ErrBadOutput}
 	g := newTestGateway(gwConfig(), newGWCache(), newGWMeter(), nil, p, s)
-	_, _, err := g.Translate(context.Background(), gwReq("hi"))
+	_, _, err := tr3(g, context.Background(), gwReq("hi"))
 	if !errors.Is(err, ErrAIUnavailable) {
 		t.Fatalf("err = %v, want ErrAIUnavailable", err)
 	}
@@ -171,12 +201,12 @@ func TestGateway_CacheHit(t *testing.T) {
 	cache, meter := newGWCache(), newGWMeter()
 	p := &gwProvider{name: "claude", model: "claude-haiku-5-5", usage: llm.Usage{InputTokens: 1000, OutputTokens: 1000}}
 	g := newTestGateway(gwConfig(), cache, meter, nil, p)
-	text1, _, err := g.Translate(context.Background(), gwReq("你好  世界"))
+	text1, _, err := tr3(g, context.Background(), gwReq("你好  世界"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	adds := meter.adds
-	text2, risk, err := g.Translate(context.Background(), gwReq(" \t你好 \n 世界　"))
+	text2, risk, err := tr3(g, context.Background(), gwReq(" \t你好 \n 世界　"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,14 +246,14 @@ func TestGateway_BreakerOpensAndSkips(t *testing.T) {
 	s := &gwProvider{name: "fake-secondary"}
 	g := newTestGateway(gwConfig(), newGWCache(), newGWMeter(), nil, p, s)
 	for i := 0; i < 20; i++ {
-		if _, _, err := g.Translate(context.Background(), gwReq(fmt.Sprintf("msg %d", i))); err != nil {
+		if _, _, err := tr3(g, context.Background(), gwReq(fmt.Sprintf("msg %d", i))); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if p.calls.Load() != 20 {
 		t.Fatalf("primary calls = %d, want 20", p.calls.Load())
 	}
-	text, _, err := g.Translate(context.Background(), gwReq("msg 21"))
+	text, _, err := tr3(g, context.Background(), gwReq("msg 21"))
 	if err != nil || text != "fake-secondary:msg 21" {
 		t.Fatalf("got %q, %v", text, err)
 	}
@@ -238,7 +268,7 @@ func TestGateway_CallerCancelNotCountedAsFailure(t *testing.T) {
 	g := newTestGateway(gwConfig(), newGWCache(), newGWMeter(), nil, p, s)
 	for i := 0; i < 20; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-		_, _, err := g.Translate(ctx, gwReq(fmt.Sprintf("msg %d", i)))
+		_, _, err := tr3(g, ctx, gwReq(fmt.Sprintf("msg %d", i)))
 		cancel()
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("err = %v, want the caller's ctx error", err)
@@ -249,7 +279,7 @@ func TestGateway_CallerCancelNotCountedAsFailure(t *testing.T) {
 	}
 	// The breaker must still be closed: the next call reaches the primary.
 	p.sleep = 0
-	if _, _, err := g.Translate(context.Background(), gwReq("after")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("after")); err != nil {
 		t.Fatal(err)
 	}
 	if p.calls.Load() != 21 {
@@ -273,7 +303,7 @@ func TestGateway_CallerCancelDuringHalfOpenKeepsBreakerOpen(t *testing.T) {
 	g := newTestGateway(gwConfig(), newGWCache(), newGWMeter(), nil, p, s)
 	cb := g.chain[0].cb
 	for i := 0; i < 20; i++ {
-		if _, _, err := g.Translate(context.Background(), gwReq(fmt.Sprintf("msg %d", i))); err != nil {
+		if _, _, err := tr3(g, context.Background(), gwReq(fmt.Sprintf("msg %d", i))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -289,7 +319,7 @@ func TestGateway_CallerCancelDuringHalfOpenKeepsBreakerOpen(t *testing.T) {
 	p.err, p.sleep = nil, 5*time.Second
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(10*time.Millisecond, cancel)
-	if _, _, err := g.Translate(ctx, gwReq("probe")); !errors.Is(err, context.Canceled) {
+	if _, _, err := tr3(g, ctx, gwReq("probe")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	if cb.State() != gobreaker.StateHalfOpen {
@@ -299,7 +329,7 @@ func TestGateway_CallerCancelDuringHalfOpenKeepsBreakerOpen(t *testing.T) {
 
 	// The next real probe fails: the breaker re-opens and the primary is skipped.
 	p.err, p.sleep = errors.New("still down"), 0
-	if _, _, err := g.Translate(context.Background(), gwReq("probe 2")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("probe 2")); err != nil {
 		t.Fatal(err)
 	}
 	if p.calls.Load() != calls+1 {
@@ -308,7 +338,7 @@ func TestGateway_CallerCancelDuringHalfOpenKeepsBreakerOpen(t *testing.T) {
 	if cb.State() != gobreaker.StateOpen {
 		t.Fatalf("state after failed probe = %v, want open", cb.State())
 	}
-	if _, _, err := g.Translate(context.Background(), gwReq("after")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("after")); err != nil {
 		t.Fatal(err)
 	}
 	if p.calls.Load() != calls+1 {
@@ -322,7 +352,7 @@ func TestGateway_PerCallTimeoutCountsAsFailure(t *testing.T) {
 	p := &gwProvider{name: "fake-primary", sleep: time.Second}
 	s := &gwProvider{name: "fake-secondary"}
 	g := newTestGateway(cfg, newGWCache(), newGWMeter(), nil, p, s)
-	if _, _, err := g.Translate(context.Background(), gwReq("hi")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("hi")); err != nil {
 		t.Fatal(err)
 	}
 	if c := g.chain[0].cb.Counts(); c.TotalFailures != 1 || c.TotalExclusions != 0 {
@@ -337,7 +367,7 @@ func TestGateway_Timeout(t *testing.T) {
 	s := &gwProvider{name: "fake-secondary"}
 	g := newTestGateway(cfg, newGWCache(), newGWMeter(), nil, p, s)
 	start := time.Now()
-	text, _, err := g.Translate(context.Background(), gwReq("hi"))
+	text, _, err := tr3(g, context.Background(), gwReq("hi"))
 	if err != nil || text != "fake-secondary:hi" {
 		t.Fatalf("got %q, %v", text, err)
 	}
@@ -354,7 +384,7 @@ func TestGateway_ConfiguredPrice(t *testing.T) {
 	cfg.Prices = map[string]llm.Price{"gemini-paid": {InPerM: 200000, OutPerM: 800000}}
 	gem := &gwProvider{name: "gemini", model: "gemini-paid", usage: llm.Usage{InputTokens: 1_000_000, OutputTokens: 500_000}}
 	g := newTestGateway(cfg, newGWCache(), meter, nil, gem)
-	if _, _, err := g.Translate(context.Background(), gwReq("hi")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("hi")); err != nil {
 		t.Fatal(err)
 	}
 	if got := meter.data[gwDay]; got != 600000 {
@@ -366,7 +396,7 @@ func TestGateway_ConfiguredPrice(t *testing.T) {
 	cfg.Prices = map[string]llm.Price{"claude-haiku-5-5": {InPerM: 1, OutPerM: 1}}
 	haiku := &gwProvider{name: "claude", model: "claude-haiku-5-5", usage: llm.Usage{InputTokens: 1_000_000}}
 	g = newTestGateway(cfg, newGWCache(), over, nil, haiku)
-	if _, _, err := g.Translate(context.Background(), gwReq("hi")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("hi")); err != nil {
 		t.Fatal(err)
 	}
 	if got := over.data[gwDay]; got != 1 {
@@ -378,7 +408,7 @@ func TestGateway_CostAndHardCap(t *testing.T) {
 	meter := newGWMeter()
 	haiku := &gwProvider{name: "claude", model: "claude-haiku-5-5", usage: llm.Usage{InputTokens: 1_000_000}}
 	g := newTestGateway(gwConfig(), newGWCache(), meter, nil, haiku)
-	if _, _, err := g.Translate(context.Background(), gwReq("hi")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("hi")); err != nil {
 		t.Fatal(err)
 	}
 	if got := meter.data[gwDay]; got != 100000 {
@@ -390,7 +420,7 @@ func TestGateway_CostAndHardCap(t *testing.T) {
 	cfg.ZeroCost = map[string]bool{"gemini": true}
 	gem := &gwProvider{name: "gemini", model: "claude-haiku-5-5", usage: llm.Usage{InputTokens: 1_000_000}}
 	g = newTestGateway(cfg, newGWCache(), free, nil, gem)
-	if _, _, err := g.Translate(context.Background(), gwReq("hi")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("hi")); err != nil {
 		t.Fatal(err)
 	}
 	if got := free.data[gwDay]; got != 0 {
@@ -400,7 +430,7 @@ func TestGateway_CostAndHardCap(t *testing.T) {
 	unknown := newGWMeter()
 	odd := &gwProvider{name: "claude", model: "some-new-model", usage: llm.Usage{InputTokens: 1_000_000}}
 	g = newTestGateway(gwConfig(), newGWCache(), unknown, nil, odd)
-	if _, _, err := g.Translate(context.Background(), gwReq("hi")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("hi")); err != nil {
 		t.Fatal(err)
 	}
 	if got := unknown.data[gwDay]; got != 0 {
@@ -413,14 +443,14 @@ func TestGateway_CostAndHardCap(t *testing.T) {
 	cfg.DailyBudgetMicros = 100
 	p := &gwProvider{name: "claude", model: "claude-haiku-5-5"}
 	g = newTestGateway(cfg, newGWCache(), capped, nil, p)
-	if _, _, err := g.Translate(context.Background(), gwReq("hi")); !errors.Is(err, ErrAIBudgetExceeded) {
+	if _, _, err := tr3(g, context.Background(), gwReq("hi")); !errors.Is(err, ErrAIBudgetExceeded) {
 		t.Fatalf("err = %v, want ErrAIBudgetExceeded", err)
 	}
 	if p.calls.Load() != 0 {
 		t.Fatalf("provider called past the hard cap")
 	}
 	capped.data[gwDay] = 199
-	if _, _, err := g.Translate(context.Background(), gwReq("hi")); err != nil {
+	if _, _, err := tr3(g, context.Background(), gwReq("hi")); err != nil {
 		t.Fatalf("below 2x budget: %v", err)
 	}
 }
@@ -436,7 +466,7 @@ func TestGateway_ConcurrencyLimit(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, _, err := g.Translate(context.Background(), gwReq(fmt.Sprintf("slow %d", i)))
+			_, _, err := tr3(g, context.Background(), gwReq(fmt.Sprintf("slow %d", i)))
 			errs <- err
 		}(i)
 	}
@@ -457,11 +487,11 @@ func TestGateway_SemaphoreWaitHonoursCtx(t *testing.T) {
 	cfg.MaxConcurrent = 1
 	p := &gwProvider{name: "fake-primary", sleep: 300 * time.Millisecond}
 	g := newTestGateway(cfg, newGWCache(), newGWMeter(), nil, p)
-	go g.Translate(context.Background(), gwReq("holder")) //nolint:errcheck
+	go tr3(g, context.Background(), gwReq("holder")) //nolint:errcheck
 	time.Sleep(30 * time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, _, err := g.Translate(ctx, gwReq("waiter")); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := tr3(g, ctx, gwReq("waiter")); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want ctx error", err)
 	}
 }

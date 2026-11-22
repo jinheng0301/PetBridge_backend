@@ -25,8 +25,23 @@ type TranslationService struct {
 	tr      Translator
 	mod     Moderator
 	pub     Publisher
+	usage   UsageStore  // nil: usage is not recorded
+	pq      PolishQueue // nil: pending polishes are left for the sweep
 	now     func() time.Time
 	log     *slog.Logger
+}
+
+// WithUsage records each real translation call in ai_usage_daily under the sender.
+func (s *TranslationService) WithUsage(u UsageStore) *TranslationService {
+	s.usage = u
+	return s
+}
+
+// WithPolishQueue enqueues polish:{delivery_id} for rows whose translation
+// finished with a polish waiting on it.
+func (s *TranslationService) WithPolishQueue(q PolishQueue) *TranslationService {
+	s.pq = q
+	return s
 }
 
 func NewTranslationService(store MessageStore, members RoomMemberStore, tr Translator, mod Moderator, pub Publisher, now func() time.Time, log *slog.Logger) *TranslationService {
@@ -81,6 +96,9 @@ func (s *TranslationService) Process(ctx context.Context, messageID string) erro
 			}
 			if ok {
 				changed = append(changed, d.ReceiverID)
+				if status == model.TranslationDone && d.PolishStatus == model.PolishPending {
+					s.enqueuePolish(ctx, d.ID)
+				}
 			}
 		}
 	}
@@ -94,7 +112,9 @@ func (s *TranslationService) Process(ctx context.Context, messageID string) erro
 // translate runs one language. It returns the status to store and an error
 // only when the queue should retry.
 func (s *TranslationService) translate(ctx context.Context, w model.TranslationWork, lang string) (string, string, error) {
-	text, risk, err := s.tr.Translate(ctx, llm.TranslateRequest{Text: w.Body, SrcLang: w.SrcLang, TgtLang: lang})
+	out, err := s.tr.Translate(ctx, llm.TranslateRequest{Text: w.Body, SrcLang: w.SrcLang, TgtLang: lang})
+	s.recordUsage(ctx, w, out)
+	text, risk := out.Text, out.Risk
 	switch {
 	case errors.Is(err, ErrAIBudgetExceeded):
 		s.log.Error("translation stopped: daily hard cap reached",
@@ -114,6 +134,29 @@ func (s *TranslationService) translate(ctx context.Context, w model.TranslationW
 		s.log.Info("translation flagged by moderation", "message_id", w.MessageID, "target_lang", lang, "verdict", int(verdict))
 	}
 	return text, model.TranslationDone, nil
+}
+
+func (s *TranslationService) recordUsage(ctx context.Context, w model.TranslationWork, out AIOutcome) {
+	if s.usage == nil || out.Calls == 0 {
+		return
+	}
+	if err := s.usage.Add(context.WithoutCancel(ctx), s.now(), w.SenderID, model.UsageTranslate, out.Calls,
+		out.Usage.InputTokens, out.Usage.OutputTokens, out.CostMicros); err != nil {
+		s.log.Warn("translation usage write failed", "message_id", w.MessageID, "err", err)
+	}
+}
+
+// enqueuePolish hands a waiting polish to the queue; a failure leaves it
+// pending for the sweep.
+func (s *TranslationService) enqueuePolish(ctx context.Context, deliveryID string) {
+	if s.pq == nil {
+		return
+	}
+	ectx, cancel := context.WithTimeout(ctx, enqueueTimeout)
+	defer cancel()
+	if err := s.pq.EnqueuePolish(ectx, deliveryID, ""); err != nil {
+		s.log.Warn("polish left for the sweep: enqueue failed", "delivery_id", deliveryID, "err", err)
+	}
 }
 
 // publish sends message.translated to each changed receiver still seated in the room.
@@ -188,6 +231,11 @@ type TranslateQueue interface {
 	EnqueueTranslate(ctx context.Context, messageID, dedupe string) error
 }
 
+// PolishQueue enqueues polish:{delivery_id}; dedupe makes the task id unique per attempt.
+type PolishQueue interface {
+	EnqueuePolish(ctx context.Context, deliveryID, dedupe string) error
+}
+
 // Compensating sweep thresholds (spec 5.5).
 const (
 	sweepPendingAfter = 2 * time.Minute
@@ -196,29 +244,65 @@ const (
 	sweepLimit        = 200
 )
 
-// SweepService re-enqueues translations that were lost or failed (spec 5.5).
+// SweepService re-enqueues translations and polishes that were lost or
+// failed, and gives up polishes whose translation gave up (spec 5.5).
 type SweepService struct {
-	store MessageStore
-	q     TranslateQueue
-	now   func() time.Time
-	log   *slog.Logger
+	store  MessageStore
+	q      TranslateQueue
+	pq     PolishQueue                            // nil: translations only (B5a)
+	giveUp func(ctx context.Context) (int, error) // PolishService.GiveUp
+	now    func() time.Time
+	log    *slog.Logger
+}
+
+// WithPolish adds the polish rules to each round.
+func (s *SweepService) WithPolish(pq PolishQueue, giveUp func(ctx context.Context) (int, error)) *SweepService {
+	s.pq, s.giveUp = pq, giveUp
+	return s
 }
 
 func NewSweepService(store MessageStore, q TranslateQueue, now func() time.Time, log *slog.Logger) *SweepService {
 	return &SweepService{store: store, q: q, now: now, log: log}
 }
 
-// Sweep enqueues every stuck message once. An enqueue failure does not stop
-// the round; the last one is returned with the count that did go through.
+// Sweep runs one round: give up dead polishes, re-enqueue stuck polishes,
+// then stuck translations. No failure stops the round; the last error is
+// returned with the number of tasks that were enqueued.
 func (s *SweepService) Sweep(ctx context.Context) (int, error) {
 	now := s.now()
-	ids, err := s.store.StuckTranslations(ctx, now, sweepPendingAfter, sweepFailedEvery, sweepGiveUpAfter, sweepLimit)
-	if err != nil {
-		return 0, fmt.Errorf("stuck translations: %w", err)
-	}
 	dedupe := "sweep-" + now.UTC().Format("200601021504")
 	n := 0
 	var last error
+	if s.pq != nil {
+		if s.giveUp != nil {
+			if g, err := s.giveUp(ctx); err != nil {
+				s.log.Warn("polish give-up failed", "err", err)
+				last = err
+			} else if g > 0 {
+				s.log.Info("polish give-up", "count", g)
+			}
+		}
+		pids, err := s.store.StuckPolishes(ctx, now, sweepPendingAfter, sweepLimit)
+		if err != nil {
+			s.log.Warn("stuck polishes failed", "err", err)
+			last = fmt.Errorf("stuck polishes: %w", err)
+		}
+		for _, id := range pids {
+			if err := s.pq.EnqueuePolish(ctx, id, dedupe); err != nil {
+				s.log.Warn("sweep enqueue failed", "delivery_id", id, "err", err)
+				last = err
+				continue
+			}
+			n++
+		}
+		if len(pids) > 0 {
+			s.log.Info("polish sweep", "found", len(pids))
+		}
+	}
+	ids, err := s.store.StuckTranslations(ctx, now, sweepPendingAfter, sweepFailedEvery, sweepGiveUpAfter, sweepLimit)
+	if err != nil {
+		return n, fmt.Errorf("stuck translations: %w", err)
+	}
 	for _, id := range ids {
 		if err := s.q.EnqueueTranslate(ctx, id, dedupe); err != nil {
 			s.log.Warn("sweep enqueue failed", "message_id", id, "err", err)
