@@ -1,4 +1,4 @@
-// Command worker runs the asynq translation worker and the compensating sweep.
+// Command worker runs the asynq translation and polish worker and the compensating sweep.
 package main
 
 import (
@@ -58,13 +58,9 @@ func main() {
 	}
 	defer rdb.Close()
 	// The asynq server needs its own connections (blocking dequeues outlast
-	// rdb's 2s read timeout). It parses the same REDIS_URL, so host and /db
-	// match what rdb and the api's queue use.
-	redisOpt, err := asynq.ParseRedisURI(cfg.RedisURL)
-	if err != nil {
-		log.Error("invalid redis configuration", "error", "invalid REDIS_URL")
-		os.Exit(1)
-	}
+	// rdb's 2s read timeout); they are built from rdb's parsed options so the
+	// worker and the api's queue always point at the same Redis and DB.
+	redisOpt := queue.ServerRedisOpt(rdb)
 
 	// The queue lives in Redis, so wait for it instead of exiting.
 	if !waitForRedis(ctx, func(c context.Context) error { return pbredis.Ping(c, rdb) }, log) {
@@ -87,6 +83,7 @@ func main() {
 		newFallbackLogger(log, "redis unavailable, ai cost meter uses local counters", 30*time.Second, time.Now))
 	gw := service.NewAIGateway(providers, cache, meter, service.GatewayConfig{
 		TranslateTimeout:  3 * time.Second,
+		PolishTimeout:     6 * time.Second,
 		MaxConcurrent:     16,
 		DailyBudgetMicros: cfg.AIDailyBudgetMicros,
 		ZeroCost:          bootstrap.ZeroCost(cfg),
@@ -95,18 +92,21 @@ func main() {
 
 	store := repository.NewMessageRepo(pool)
 	members := repository.NewRoomMemberRepo(pool)
-	translation := service.NewTranslationService(store, members, gw, service.PassModerator{}, pub, time.Now, log)
-
+	usage := repository.NewAIUsageRepo(pool)
 	q := queue.New(rdb) // shares rdb's fail-fast timeouts; rdb is closed above
-	sweep := service.NewSweepService(store, q, time.Now, log)
+	translation := service.NewTranslationService(store, members, gw, service.PassModerator{}, pub, time.Now, log).
+		WithUsage(usage).WithPolishQueue(q)
+	polish := service.NewPolishService(store, members, gw, service.PassModerator{}, usage, pub, time.Now, log)
+	sweep := service.NewSweepService(store, q, time.Now, log).WithPolish(q, polish.GiveUp)
 
 	srv := asynq.NewServer(redisOpt, asynq.Config{
 		Concurrency:    cfg.WorkerConcurrency,
-		Queues:         map[string]int{queue.QueueTranslate: 6, "polish": 3, "default": 1},
+		Queues:         map[string]int{queue.QueueTranslate: 6, queue.QueuePolish: 3, "default": 1},
 		RetryDelayFunc: queue.RetryDelay,
 	})
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(queue.TypeTranslate, task.NewTranslateHandler(translation.Process))
+	mux.HandleFunc(queue.TypePolish, task.NewPolishHandler(polish.Process))
 
 	sweepCtx, cancelSweep := context.WithCancel(ctx)
 	defer cancelSweep()

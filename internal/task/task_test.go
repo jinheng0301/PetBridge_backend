@@ -65,3 +65,19 @@ func TestRunSweeper_Ticks(t *testing.T) {
 		t.Fatalf("sweep called %d times, want >= 4", got)
 	}
 }
+
+func TestPolishHandler(t *testing.T) {
+	var got string
+	h := NewPolishHandler(func(_ context.Context, id string) error { got = id; return nil })
+	if err := h.ProcessTask(context.Background(), asynq.NewTask("polish", []byte(`{"delivery_id":"d1"}`))); err != nil {
+		t.Fatal(err)
+	}
+	if got != "d1" {
+		t.Fatalf("process got %q", got)
+	}
+	for _, body := range []string{`{bad`, `{}`} {
+		if err := h.ProcessTask(context.Background(), asynq.NewTask("polish", []byte(body))); !errors.Is(err, asynq.SkipRetry) {
+			t.Fatalf("%s: err = %v, want SkipRetry", body, err)
+		}
+	}
+}

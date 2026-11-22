@@ -100,3 +100,77 @@ func TestEnqueueTranslate_Dedupes(t *testing.T) {
 		t.Fatalf("pending = %d, want 2", info.Pending)
 	}
 }
+
+func TestEnqueuePolish_Dedupes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs redis")
+	}
+	url := testRedisURL()
+	opt, err := asynq.ParseRedisURI(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insp := asynq.NewInspector(opt)
+	defer insp.Close()
+	rdb, err := pbredis.New(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rdb.Close()
+	q := New(rdb)
+	ctx := context.Background()
+	id := fmt.Sprintf("d-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		for _, tid := range []string{"polish:" + id + ":a", "polish:" + id + ":b"} {
+			_ = insp.DeleteTask(QueuePolish, tid)
+		}
+	})
+	if err := q.EnqueuePolish(ctx, id, "a"); err != nil {
+		t.Skipf("redis unavailable: %v", err)
+	}
+	if err := q.EnqueuePolish(ctx, id, "a"); err != nil {
+		t.Fatalf("second enqueue: %v", err)
+	}
+	if _, err := insp.GetTaskInfo(QueuePolish, "polish:"+id+":a"); err != nil {
+		t.Fatalf("task a: %v", err)
+	}
+	if err := q.EnqueuePolish(ctx, id, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := insp.GetTaskInfo(QueuePolish, "polish:"+id+":b"); err != nil {
+		t.Fatalf("task b: %v", err)
+	}
+	tasks, err := insp.ListPendingTasks(QueuePolish, asynq.PageSize(1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, ti := range tasks {
+		if ti.ID == "polish:"+id+":a" || ti.ID == "polish:"+id+":b" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("tasks for this id = %d, want 2", n)
+	}
+}
+
+func TestServerRedisOpt(t *testing.T) {
+	rdb, err := pbredis.New("redis://user:pw@localhost:6380/3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rdb.Close()
+	o := ServerRedisOpt(rdb)
+	if o.Addr != "localhost:6380" || o.Username != "user" || o.Password != "pw" || o.DB != 3 {
+		t.Fatalf("opt %+v", o)
+	}
+	rdb2, err := pbredis.New("redis://localhost/2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rdb2.Close()
+	if o := ServerRedisOpt(rdb2); o.Addr != "localhost:6379" || o.DB != 2 {
+		t.Fatalf("portless opt %+v", o)
+	}
+}

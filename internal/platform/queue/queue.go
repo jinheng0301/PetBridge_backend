@@ -1,4 +1,4 @@
-// Package queue is the asynq client that hands translation work to the worker.
+// Package queue is the asynq client that hands translation and polish work to the worker.
 package queue
 
 import (
@@ -15,6 +15,8 @@ import (
 const (
 	TypeTranslate  = "translate"
 	QueueTranslate = "translate"
+	TypePolish     = "polish"
+	QueuePolish    = "polish"
 	maxRetry       = 2
 )
 
@@ -23,7 +25,12 @@ type TranslatePayload struct {
 	MessageID string `json:"message_id"`
 }
 
-// Queue enqueues tasks into Redis. It implements service.TranslateQueue.
+// PolishPayload is the polish task body. It carries only the delivery id.
+type PolishPayload struct {
+	DeliveryID string `json:"delivery_id"`
+}
+
+// Queue enqueues tasks into Redis. It implements service.TranslateQueue and service.PolishQueue.
 type Queue struct {
 	c *asynq.Client
 }
@@ -52,6 +59,35 @@ func (q *Queue) EnqueueTranslate(ctx context.Context, messageID, dedupe string) 
 		return fmt.Errorf("queue: enqueue translate: %w", err)
 	}
 	return nil
+}
+
+// EnqueuePolish adds polish:{deliveryID}[:dedupe]. A task with the same id
+// still in the queue counts as success.
+func (q *Queue) EnqueuePolish(ctx context.Context, deliveryID, dedupe string) error {
+	payload, err := json.Marshal(PolishPayload{DeliveryID: deliveryID})
+	if err != nil {
+		return err
+	}
+	id := "polish:" + deliveryID
+	if dedupe != "" {
+		id += ":" + dedupe
+	}
+	_, err = q.c.EnqueueContext(ctx, asynq.NewTask(TypePolish, payload),
+		asynq.TaskID(id), asynq.Queue(QueuePolish), asynq.MaxRetry(maxRetry))
+	if err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
+		return fmt.Errorf("queue: enqueue polish: %w", err)
+	}
+	return nil
+}
+
+// ServerRedisOpt builds the asynq server's connection options from the
+// process's go-redis client, so the worker reads exactly the address,
+// credentials, DB and TLS the api's go-redis parsed from REDIS_URL. The server
+// opens its own connections (blocking dequeues outlast rdb's 2s timeouts).
+func ServerRedisOpt(rdb *goredis.Client) asynq.RedisClientOpt {
+	o := rdb.Options()
+	return asynq.RedisClientOpt{Network: o.Network, Addr: o.Addr, Username: o.Username, Password: o.Password,
+		DB: o.DB, TLSConfig: o.TLSConfig}
 }
 
 // RetryDelay is the asynq RetryDelayFunc. n is the number of earlier retries
