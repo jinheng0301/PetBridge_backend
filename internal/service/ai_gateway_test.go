@@ -346,6 +346,34 @@ func TestGateway_Timeout(t *testing.T) {
 	}
 }
 
+// A configured price is used for a model the built-in table does not know
+// (paid Gemini), and overrides the built-in price.
+func TestGateway_ConfiguredPrice(t *testing.T) {
+	meter := newGWMeter()
+	cfg := gwConfig()
+	cfg.Prices = map[string]llm.Price{"gemini-paid": {InPerM: 200000, OutPerM: 800000}}
+	gem := &gwProvider{name: "gemini", model: "gemini-paid", usage: llm.Usage{InputTokens: 1_000_000, OutputTokens: 500_000}}
+	g := newTestGateway(cfg, newGWCache(), meter, nil, gem)
+	if _, _, err := g.Translate(context.Background(), gwReq("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if got := meter.data[gwDay]; got != 600000 {
+		t.Fatalf("cost = %d, want 600000", got)
+	}
+
+	over := newGWMeter()
+	cfg = gwConfig()
+	cfg.Prices = map[string]llm.Price{"claude-haiku-5-5": {InPerM: 1, OutPerM: 1}}
+	haiku := &gwProvider{name: "claude", model: "claude-haiku-5-5", usage: llm.Usage{InputTokens: 1_000_000}}
+	g = newTestGateway(cfg, newGWCache(), over, nil, haiku)
+	if _, _, err := g.Translate(context.Background(), gwReq("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if got := over.data[gwDay]; got != 1 {
+		t.Fatalf("override cost = %d, want 1", got)
+	}
+}
+
 func TestGateway_CostAndHardCap(t *testing.T) {
 	meter := newGWMeter()
 	haiku := &gwProvider{name: "claude", model: "claude-haiku-5-5", usage: llm.Usage{InputTokens: 1_000_000}}

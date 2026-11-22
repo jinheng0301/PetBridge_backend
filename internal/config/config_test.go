@@ -346,6 +346,23 @@ func TestLoad_AIValidation(t *testing.T) {
 		{"fail rate", with(required(), "FAKE_AI_FAIL_RATE", "1.5"), "FAKE_AI_FAIL_RATE"},
 		{"budget", with(required(), "AI_DAILY_BUDGET_USD", "0"), "AI_DAILY_BUDGET_USD"},
 		{"concurrency", with(required(), "WORKER_CONCURRENCY", "0"), "WORKER_CONCURRENCY"},
+		{"budget NaN", with(required(), "AI_DAILY_BUDGET_USD", "NaN"), "AI_DAILY_BUDGET_USD"},
+		{"budget Inf", with(required(), "AI_DAILY_BUDGET_USD", "Inf"), "AI_DAILY_BUDGET_USD"},
+		{"budget -Inf", with(required(), "AI_DAILY_BUDGET_USD", "-Inf"), "AI_DAILY_BUDGET_USD"},
+		{"fail rate NaN", with(required(), "FAKE_AI_FAIL_RATE", "NaN"), "FAKE_AI_FAIL_RATE"},
+		{"secondary fail rate NaN", with(required(), "FAKE_AI_SECONDARY_FAIL_RATE", "nan"), "FAKE_AI_SECONDARY_FAIL_RATE"},
+		{"gemini price NaN", with(required(), "GEMINI_PRICE_IN_USD_PER_M", "NaN"), "GEMINI_PRICE_IN_USD_PER_M"},
+		{"gemini price Inf", with(required(), "GEMINI_PRICE_OUT_USD_PER_M", "+Inf"), "GEMINI_PRICE_OUT_USD_PER_M"},
+		{"gemini price negative", with(required(), "GEMINI_PRICE_IN_USD_PER_M", "-0.1"), "GEMINI_PRICE_IN_USD_PER_M"},
+		{"prod paid gemini no prices", with(prod, "GEMINI_API_KEY", "secret-gem-key", "GEMINI_MODEL_TRANSLATE", "m",
+			"GEMINI_FREE_TIER", "false"), "GEMINI_PRICE_IN_USD_PER_M"},
+		{"prod paid gemini one price", with(prod, "GEMINI_API_KEY", "secret-gem-key", "GEMINI_MODEL_TRANSLATE", "m",
+			"GEMINI_FREE_TIER", "false", "GEMINI_PRICE_IN_USD_PER_M", "0.1"), "GEMINI_PRICE_OUT_USD_PER_M"},
+		{"prod claude unknown model", with(prod, "AI_PRIMARY", "claude", "ANTHROPIC_API_KEY", "secret-gem-key",
+			"CLAUDE_MODEL_TRANSLATE", "claude-unpriced"), "CLAUDE_MODEL_TRANSLATE"},
+		{"prod claude fallback unknown model", with(prod, "GEMINI_API_KEY", "secret-gem-key", "GEMINI_MODEL_TRANSLATE", "m",
+			"GEMINI_FREE_TIER", "false", "GEMINI_PRICE_IN_USD_PER_M", "0.1", "GEMINI_PRICE_OUT_USD_PER_M", "0.4",
+			"ANTHROPIC_API_KEY", "secret-gem-key", "CLAUDE_MODEL_TRANSLATE", "claude-unpriced"), "CLAUDE_MODEL_TRANSLATE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,6 +375,39 @@ func TestLoad_AIValidation(t *testing.T) {
 				t.Errorf("problems leak a key value: %s", p)
 			}
 		})
+	}
+}
+
+func TestLoad_ProductionPaidGeminiPriced(t *testing.T) {
+	e := with(required(),
+		"APP_ENV", "production",
+		"JWT_SIGNING_KEY", strings.Repeat("k", 32),
+		"DATABASE_URL", "postgres://u:p@db/petbridge?sslmode=require",
+		"AI_PROVIDER", "live", "GEMINI_API_KEY", "g", "GEMINI_MODEL_TRANSLATE", "gemini-x",
+		"GEMINI_FREE_TIER", "false", "GEMINI_PRICE_IN_USD_PER_M", "0.1", "GEMINI_PRICE_OUT_USD_PER_M", "0.4")
+	c, err := Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.GeminiPriceSet || c.GeminiPriceInMicros != 100000 || c.GeminiPriceOutMicros != 400000 {
+		t.Fatalf("prices = %v %d %d", c.GeminiPriceSet, c.GeminiPriceInMicros, c.GeminiPriceOutMicros)
+	}
+}
+
+// Outside production a paid model without a price is allowed (cost 0 plus a warning).
+func TestLoad_StagingPaidGeminiUnpriced(t *testing.T) {
+	e := with(required(),
+		"APP_ENV", "staging",
+		"JWT_SIGNING_KEY", strings.Repeat("k", 32),
+		"DATABASE_URL", "postgres://u:p@db/petbridge?sslmode=require",
+		"AI_PROVIDER", "live", "GEMINI_API_KEY", "g", "GEMINI_MODEL_TRANSLATE", "gemini-x",
+		"GEMINI_FREE_TIER", "false", "ANTHROPIC_API_KEY", "a", "CLAUDE_MODEL_TRANSLATE", "claude-unpriced")
+	c, err := Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.GeminiPriceSet {
+		t.Fatal("price set without vars")
 	}
 }
 

@@ -56,3 +56,13 @@ func ZeroCost(c *config.Config) map[string]bool {
 	}
 	return z
 }
+
+// Prices lists configured model prices for the gateway: the paid Gemini
+// model when GEMINI_PRICE_* are set. Other models use llm's built-in table.
+func Prices(c *config.Config) map[string]llm.Price {
+	p := map[string]llm.Price{}
+	if c.GeminiPriceSet && c.GeminiModelTranslate != "" {
+		p[c.GeminiModelTranslate] = llm.Price{InPerM: c.GeminiPriceInMicros, OutPerM: c.GeminiPriceOutMicros}
+	}
+	return p
+}

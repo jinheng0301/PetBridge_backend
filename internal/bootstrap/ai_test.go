@@ -52,3 +52,13 @@ func TestZeroCost(t *testing.T) {
 		t.Fatalf("paid: %v", z)
 	}
 }
+
+func TestPrices(t *testing.T) {
+	c := &config.Config{GeminiModelTranslate: "gemini-x", GeminiPriceSet: true, GeminiPriceInMicros: 1, GeminiPriceOutMicros: 2}
+	if p := Prices(c); len(p) != 1 || p["gemini-x"] != (llm.Price{InPerM: 1, OutPerM: 2}) {
+		t.Fatalf("prices: %v", p)
+	}
+	if p := Prices(&config.Config{GeminiModelTranslate: "gemini-x"}); len(p) != 0 {
+		t.Fatalf("unset: %v", p)
+	}
+}

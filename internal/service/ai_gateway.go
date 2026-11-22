@@ -35,6 +35,9 @@ type GatewayConfig struct {
 	MaxConcurrent     int           // in-flight provider chains per process; 16
 	DailyBudgetMicros int64         // translation stops at 2x this
 	ZeroCost          map[string]bool
+	// Prices are configured per-model prices (model name -> micro-USD per
+	// million tokens), consulted before llm's built-in table.
+	Prices map[string]llm.Price
 }
 
 // Translator returns the translation and the provider's risk verdict ("none"
@@ -207,6 +210,9 @@ func (g *AIGateway) costMicros(provider string, res llm.TranslateResult) int64 {
 		return 0
 	}
 	in, out, ok := llm.PriceMicros(res.Model)
+	if p, set := g.cfg.Prices[res.Model]; set {
+		in, out, ok = p.InPerM, p.OutPerM, true
+	}
 	if !ok {
 		if _, seen := g.warned.LoadOrStore(res.Model, struct{}{}); !seen {
 			g.log.Warn("ai model has no price; cost counted as 0", "provider", provider, "model", res.Model)

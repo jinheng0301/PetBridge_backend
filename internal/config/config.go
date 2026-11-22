@@ -13,7 +13,12 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"github.com/jinheng0301/petbridge/pkg/llm"
 )
+
+// finite reports whether f is a real number (not NaN or ±Inf).
+func finite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
 
 // versionRE matches a plain MAJOR.MINOR.PATCH app version.
 var versionRE = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
@@ -38,7 +43,10 @@ type Config struct {
 	AIPrimary               string // gemini | claude: which provider is tried first in live mode
 	GeminiAPIKey            string
 	GeminiModelTranslate    string
-	GeminiFreeTier          bool // Gemini free tier: its cost is recorded as 0
+	GeminiFreeTier          bool  // Gemini free tier: its cost is recorded as 0
+	GeminiPriceSet          bool  // both GEMINI_PRICE_* vars are set
+	GeminiPriceInMicros     int64 // GEMINI_PRICE_IN_USD_PER_M in micro-USD per million tokens
+	GeminiPriceOutMicros    int64 // GEMINI_PRICE_OUT_USD_PER_M in micro-USD per million tokens
 	AnthropicAPIKey         string
 	ClaudeModelTranslate    string
 	FakeAILatency           time.Duration
@@ -166,6 +174,25 @@ func Load(getenv func(string) string) (*Config, error) {
 		add("GEMINI_FREE_TIER must be true or false")
 	}
 	c.GeminiFreeTier = freeTier
+	// Optional paid-Gemini price in USD per million tokens; empty = unset.
+	price := func(name string) (int64, bool) {
+		v := get(name, "")
+		if v == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !finite(f) || f < 0 || f > 1e6 {
+			add("%s must be a number between 0 and 1000000", name)
+			return 0, false
+		}
+		return int64(math.Round(f * 1_000_000)), true
+	}
+	inMicros, inSet := price("GEMINI_PRICE_IN_USD_PER_M")
+	outMicros, outSet := price("GEMINI_PRICE_OUT_USD_PER_M")
+	c.GeminiPriceSet = inSet && outSet
+	if c.GeminiPriceSet {
+		c.GeminiPriceInMicros, c.GeminiPriceOutMicros = inMicros, outMicros
+	}
 	latencyMS, err := strconv.Atoi(get("FAKE_AI_LATENCY_MS", "300"))
 	if err != nil || latencyMS < 0 {
 		add("FAKE_AI_LATENCY_MS must be an integer of at least 0")
@@ -173,7 +200,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.FakeAILatency = time.Duration(latencyMS) * time.Millisecond
 	rate := func(name string) float64 {
 		f, err := strconv.ParseFloat(get(name, "0"), 64)
-		if err != nil || f < 0 || f > 1 {
+		if err != nil || !finite(f) || f < 0 || f > 1 {
 			add("%s must be a number between 0 and 1", name)
 			return 0
 		}
@@ -182,7 +209,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.FakeAIFailRate = rate("FAKE_AI_FAIL_RATE")
 	c.FakeAISecondaryFailRate = rate("FAKE_AI_SECONDARY_FAIL_RATE")
 	budget, err := strconv.ParseFloat(get("AI_DAILY_BUDGET_USD", "5"), 64)
-	if err != nil || budget <= 0 || budget > 1e9 {
+	if err != nil || !finite(budget) || budget <= 0 || budget > 1e9 {
 		add("AI_DAILY_BUDGET_USD must be a number greater than 0")
 	} else {
 		c.AIDailyBudgetMicros = int64(math.Round(budget * 1_000_000))
@@ -231,6 +258,17 @@ func Load(getenv func(string) string) (*Config, error) {
 		}
 		if c.AppEnv == "production" && geminiOnChain && c.GeminiFreeTier {
 			add("GEMINI_FREE_TIER must be false when APP_ENV=production and Gemini is in the provider chain")
+		}
+		// In production every paid provider on the chain must have a known
+		// price, or its spend is metered as 0 and the budget cap cannot see it.
+		if c.AppEnv == "production" && geminiOnChain && !c.GeminiFreeTier && !c.GeminiPriceSet {
+			add("GEMINI_PRICE_IN_USD_PER_M and GEMINI_PRICE_OUT_USD_PER_M are required when APP_ENV=production and paid Gemini is in the provider chain")
+		}
+		claudeOnChain := c.AIPrimary == "claude" || c.AnthropicAPIKey != ""
+		if c.AppEnv == "production" && claudeOnChain {
+			if _, _, ok := llm.PriceMicros(c.ClaudeModelTranslate); !ok {
+				add("CLAUDE_MODEL_TRANSLATE must be a model with a known price when APP_ENV=production")
+			}
 		}
 	}
 	if c.AppEnv != "" && c.AppEnv != "local" {
