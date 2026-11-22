@@ -17,7 +17,7 @@ type provider struct {
 	rnd      func() float64
 }
 
-// New returns a provider that answers "[tgt] text" with Model "fake" after
+// New returns a provider that answers with Model "fake" after
 // latency, failing with probability failRate. rnd (nil = math/rand/v2) draws
 // values in [0,1); a draw < failRate fails.
 func New(name string, latency time.Duration, failRate float64, rnd func() float64) llm.Provider {
@@ -29,26 +29,37 @@ func New(name string, latency time.Duration, failRate float64, rnd func() float6
 
 func (p *provider) Name() string { return p.name }
 
-func (p *provider) Translate(ctx context.Context, req llm.TranslateRequest) (llm.TranslateResult, error) {
+// Translate answers "[tgt] text".
+func (p *provider) Translate(ctx context.Context, req llm.TranslateRequest) (llm.Result, error) {
+	return p.answer(ctx, "["+req.TgtLang+"] "+req.Text, req.Text)
+}
+
+// Polish answers "text ~": a change that passes every polish check, so the
+// fake chain reaches done instead of fallback.
+func (p *provider) Polish(ctx context.Context, req llm.PolishRequest) (llm.Result, error) {
+	return p.answer(ctx, req.Text+" ~", req.Text)
+}
+
+func (p *provider) answer(ctx context.Context, out, in string) (llm.Result, error) {
 	if p.latency > 0 {
 		t := time.NewTimer(p.latency)
 		defer t.Stop()
 		select {
 		case <-ctx.Done():
-			return llm.TranslateResult{}, ctx.Err()
+			return llm.Result{}, ctx.Err()
 		case <-t.C:
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return llm.TranslateResult{}, err
+		return llm.Result{}, err
 	}
 	if p.failRate > 0 && p.rnd() < p.failRate {
-		return llm.TranslateResult{}, errors.New("fake: injected failure")
+		return llm.Result{}, errors.New("fake: injected failure")
 	}
-	return llm.TranslateResult{
-		Text:  "[" + req.TgtLang + "] " + req.Text,
+	return llm.Result{
+		Text:  out,
 		Risk:  llm.RiskNone,
 		Model: "fake",
-		Usage: llm.Usage{InputTokens: int64(len(req.Text)), OutputTokens: int64(len(req.Text))},
+		Usage: llm.Usage{InputTokens: int64(len(in)), OutputTokens: int64(len(out))},
 	}, nil
 }

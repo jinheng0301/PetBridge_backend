@@ -37,3 +37,14 @@ func TestFake(t *testing.T) {
 		t.Error("cancelled ctx must error")
 	}
 }
+
+func TestFake_Polish(t *testing.T) {
+	res, err := fake.New("fake-primary", 0, 0, nil).Polish(context.Background(),
+		llm.PolishRequest{Text: "好的呀", SrcLang: "ko", TgtLang: "zh-Hans", MBTI: "ENFP", Tier: llm.TierLight})
+	if err != nil || res.Text != "好的呀 ~" || res.Model != "fake" {
+		t.Fatalf("got %+v %v", res, err)
+	}
+	if _, err := fake.New("x", 0, 1, nil).Polish(context.Background(), llm.PolishRequest{Text: "x"}); err == nil {
+		t.Error("failRate=1 must fail")
+	}
+}

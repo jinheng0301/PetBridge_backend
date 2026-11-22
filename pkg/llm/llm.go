@@ -15,19 +15,33 @@ import (
 // (it is part of the translation cache key).
 const PromptVersion = "t2"
 
+// PolishPromptVersion must be bumped whenever any polish prompt fragment
+// changes (it is part of the polish cache key).
+const PolishPromptVersion = "p1"
+
+// TierLight is the only polish tier in the MVP (backend TRD 10.3.4).
+const TierLight = "light"
+
 type TranslateRequest struct{ Text, SrcLang, TgtLang string }
 
 type Usage struct{ InputTokens, OutputTokens int64 }
 
-type TranslateResult struct {
+// Result is a provider's answer to a translate or polish call.
+type Result struct {
 	Text, Risk, Model string
 	Usage             Usage
 }
 
+// PolishRequest asks for the base translation Text to be re-toned for a
+// receiver of type MBTI. Source is the original message, used only to check
+// meaning; it is empty when sender and receiver share a language.
+type PolishRequest struct{ Text, Source, SrcLang, TgtLang, MBTI, Tier string }
+
 type Provider interface {
 	// Name is "gemini" | "claude" | "fake-primary" | "fake-secondary".
 	Name() string
-	Translate(ctx context.Context, req TranslateRequest) (TranslateResult, error)
+	Translate(ctx context.Context, req TranslateRequest) (Result, error)
+	Polish(ctx context.Context, req PolishRequest) (Result, error)
 }
 
 var (

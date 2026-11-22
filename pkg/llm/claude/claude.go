@@ -14,11 +14,11 @@ import (
 )
 
 // Config; BaseURL is for tests only.
-type Config struct{ APIKey, Model, BaseURL string }
+type Config struct{ APIKey, Model, PolishModel, BaseURL string }
 
 type provider struct {
-	client anthropic.Client
-	model  string
+	client             anthropic.Client
+	model, polishModel string
 }
 
 func New(c Config) llm.Provider {
@@ -29,15 +29,24 @@ func New(c Config) llm.Provider {
 	if c.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(c.BaseURL))
 	}
-	return &provider{client: anthropic.NewClient(opts...), model: c.Model}
+	return &provider{client: anthropic.NewClient(opts...), model: c.Model, polishModel: c.PolishModel}
 }
 
 func (p *provider) Name() string { return "claude" }
 
-func (p *provider) Translate(ctx context.Context, req llm.TranslateRequest) (llm.TranslateResult, error) {
+func (p *provider) Translate(ctx context.Context, req llm.TranslateRequest) (llm.Result, error) {
 	system, user := llm.TranslatePrompt(req)
+	return p.generate(ctx, p.model, system, user)
+}
+
+func (p *provider) Polish(ctx context.Context, req llm.PolishRequest) (llm.Result, error) {
+	system, user := llm.PolishPrompt(req)
+	return p.generate(ctx, p.polishModel, system, user)
+}
+
+func (p *provider) generate(ctx context.Context, model, system, user string) (llm.Result, error) {
 	msg, err := p.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     p.model,
+		Model:     model,
 		MaxTokens: 2048,
 		System:    []anthropic.TextBlockParam{{Text: system}},
 		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(user))},
@@ -48,13 +57,13 @@ func (p *provider) Translate(ctx context.Context, req llm.TranslateRequest) (llm
 	})
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
-			return llm.TranslateResult{}, cerr
+			return llm.Result{}, cerr
 		}
 		var ae *anthropic.Error
 		if errors.As(err, &ae) && ae.StatusCode == http.StatusTooManyRequests {
-			return llm.TranslateResult{}, fmt.Errorf("claude: %w", llm.ErrRateLimited)
+			return llm.Result{}, fmt.Errorf("claude: %w", llm.ErrRateLimited)
 		}
-		return llm.TranslateResult{}, fmt.Errorf("claude: messages: %w", err)
+		return llm.Result{}, fmt.Errorf("claude: messages: %w", err)
 	}
 	var raw string
 	for _, b := range msg.Content {
@@ -64,10 +73,10 @@ func (p *provider) Translate(ctx context.Context, req llm.TranslateRequest) (llm
 	}
 	text, risk, err := llm.ParseResult(raw)
 	if err != nil {
-		return llm.TranslateResult{}, err
+		return llm.Result{}, err
 	}
-	return llm.TranslateResult{
-		Text: text, Risk: risk, Model: p.model,
+	return llm.Result{
+		Text: text, Risk: risk, Model: model,
 		Usage: llm.Usage{InputTokens: msg.Usage.InputTokens, OutputTokens: msg.Usage.OutputTokens},
 	}, nil
 }

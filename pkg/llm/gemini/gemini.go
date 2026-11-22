@@ -13,11 +13,11 @@ import (
 )
 
 // Config; BaseURL is for tests only.
-type Config struct{ APIKey, Model, BaseURL string }
+type Config struct{ APIKey, Model, PolishModel, BaseURL string }
 
 type provider struct {
-	client *genai.Client
-	model  string
+	client             *genai.Client
+	model, polishModel string
 }
 
 func New(ctx context.Context, c Config) (llm.Provider, error) {
@@ -33,14 +33,23 @@ func New(ctx context.Context, c Config) (llm.Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gemini: new client: %w", err)
 	}
-	return &provider{client: cl, model: c.Model}, nil
+	return &provider{client: cl, model: c.Model, polishModel: c.PolishModel}, nil
 }
 
 func (p *provider) Name() string { return "gemini" }
 
-func (p *provider) Translate(ctx context.Context, req llm.TranslateRequest) (llm.TranslateResult, error) {
+func (p *provider) Translate(ctx context.Context, req llm.TranslateRequest) (llm.Result, error) {
 	system, user := llm.TranslatePrompt(req)
-	resp, err := p.client.Models.GenerateContent(ctx, p.model,
+	return p.generate(ctx, p.model, system, user)
+}
+
+func (p *provider) Polish(ctx context.Context, req llm.PolishRequest) (llm.Result, error) {
+	system, user := llm.PolishPrompt(req)
+	return p.generate(ctx, p.polishModel, system, user)
+}
+
+func (p *provider) generate(ctx context.Context, model, system, user string) (llm.Result, error) {
+	resp, err := p.client.Models.GenerateContent(ctx, model,
 		[]*genai.Content{genai.NewContentFromText(user, genai.RoleUser)},
 		&genai.GenerateContentConfig{
 			SystemInstruction:  genai.NewContentFromText(system, genai.RoleUser),
@@ -49,25 +58,25 @@ func (p *provider) Translate(ctx context.Context, req llm.TranslateRequest) (llm
 		})
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
-			return llm.TranslateResult{}, cerr
+			return llm.Result{}, cerr
 		}
 		var ae genai.APIError
 		if errors.As(err, &ae) && ae.Code == http.StatusTooManyRequests {
-			return llm.TranslateResult{}, fmt.Errorf("gemini: %w", llm.ErrRateLimited)
+			return llm.Result{}, fmt.Errorf("gemini: %w", llm.ErrRateLimited)
 		}
 		var pae *genai.APIError
 		if errors.As(err, &pae) && pae.Code == http.StatusTooManyRequests {
-			return llm.TranslateResult{}, fmt.Errorf("gemini: %w", llm.ErrRateLimited)
+			return llm.Result{}, fmt.Errorf("gemini: %w", llm.ErrRateLimited)
 		}
-		return llm.TranslateResult{}, fmt.Errorf("gemini: generate: %w", err)
+		return llm.Result{}, fmt.Errorf("gemini: generate: %w", err)
 	}
 	text, risk, err := llm.ParseResult(resp.Text())
 	if err != nil {
-		return llm.TranslateResult{}, err
+		return llm.Result{}, err
 	}
 	var u llm.Usage
 	if m := resp.UsageMetadata; m != nil {
 		u = llm.Usage{InputTokens: int64(m.PromptTokenCount), OutputTokens: int64(m.CandidatesTokenCount) + int64(m.ThoughtsTokenCount)}
 	}
-	return llm.TranslateResult{Text: text, Risk: risk, Model: p.model, Usage: u}, nil
+	return llm.Result{Text: text, Risk: risk, Model: model, Usage: u}, nil
 }

@@ -128,3 +128,51 @@ func TestClaude_BadResponses(t *testing.T) {
 		}
 	})
 }
+
+var polishReq = llm.PolishRequest{Text: "明天见。", Source: "내일 봐요.", SrcLang: "ko", TgtLang: "zh-Hans", MBTI: "ENFP", Tier: llm.TierLight}
+
+func TestClaude_Polish(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(msgBody(`{"text":"明天见啦！","risk":"none"}`)))
+	}))
+	t.Cleanup(srv.Close)
+	p := claude.New(claude.Config{APIKey: "k", Model: "claude-test", PolishModel: "claude-polish", BaseURL: srv.URL})
+	res, err := p.Polish(context.Background(), polishReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text != "明天见啦！" || res.Model != "claude-polish" {
+		t.Errorf("got %+v", res)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	oc, _ := sent["output_config"].(map[string]any)
+	format, _ := oc["format"].(map[string]any)
+	if sent["model"] != "claude-polish" || oc["effort"] != "low" || format["type"] != "json_schema" {
+		t.Errorf("request: %v", sent)
+	}
+
+	for _, c := range []struct {
+		status int
+		body   string
+		want   error
+	}{
+		{429, `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`, llm.ErrRateLimited},
+		{200, msgBody("not json"), llm.ErrBadOutput},
+	} {
+		bad := newProvider(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(c.status)
+			_, _ = w.Write([]byte(c.body))
+		})
+		if _, err := bad.Polish(context.Background(), polishReq); !errors.Is(err, c.want) {
+			t.Errorf("status %d: want %v, got %v", c.status, c.want, err)
+		}
+	}
+}

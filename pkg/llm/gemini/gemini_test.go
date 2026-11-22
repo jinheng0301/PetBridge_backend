@@ -24,7 +24,7 @@ func newProvider(t *testing.T, h http.HandlerFunc) llm.Provider {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	p, err := gemini.New(context.Background(), gemini.Config{APIKey: "test-key", Model: "gemini-test", BaseURL: srv.URL})
+	p, err := gemini.New(context.Background(), gemini.Config{APIKey: "test-key", Model: "gemini-test", PolishModel: "gemini-test", BaseURL: srv.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,4 +116,49 @@ func TestGemini_BadResponses(t *testing.T) {
 func quote(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return `"` + r.Replace(s) + `"`
+}
+
+var polishReq = llm.PolishRequest{Text: "明天见。", Source: "내일 봐요.", SrcLang: "ko", TgtLang: "zh-Hans", MBTI: "ENFP", Tier: llm.TierLight}
+
+func TestGemini_Polish(t *testing.T) {
+	var path, body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		path, body = r.URL.Path, string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(okBody))
+	}))
+	t.Cleanup(srv.Close)
+	p, err := gemini.New(context.Background(), gemini.Config{APIKey: "k", Model: "gemini-test", PolishModel: "gemini-polish", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := p.Polish(context.Background(), polishReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Model != "gemini-polish" || !strings.Contains(path, "gemini-polish") {
+		t.Errorf("model %q path %q", res.Model, path)
+	}
+	if !strings.Contains(body, "application/json") || !strings.Contains(body, "明天见") {
+		t.Errorf("body: %s", body)
+	}
+
+	for _, c := range []struct {
+		status int
+		body   string
+		want   error
+	}{
+		{429, `{"error":{"code":429,"message":"slow","status":"RESOURCE_EXHAUSTED"}}`, llm.ErrRateLimited},
+		{200, `{"candidates":[{"content":{"role":"model","parts":[{"text":"not json"}]}}]}`, llm.ErrBadOutput},
+	} {
+		bad := newProvider(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(c.status)
+			_, _ = w.Write([]byte(c.body))
+		})
+		if _, err := bad.Polish(context.Background(), polishReq); !errors.Is(err, c.want) {
+			t.Errorf("status %d: want %v, got %v", c.status, c.want, err)
+		}
+	}
 }
