@@ -265,6 +265,9 @@ func TestRoomsMine_HTTP(t *testing.T) {
 	if own["id"] != b.roomID || own["is_owner"] != true || own["member_count"] != float64(1) {
 		t.Fatalf("own room = %v", own)
 	}
+	if v, ok := other["regen_remaining_today"]; own["regen_remaining_today"] != float64(3) || !ok || v != nil {
+		t.Fatalf("regen_remaining_today: own=%v other=%v (present=%v), want 3 and null", own["regen_remaining_today"], v, ok)
+	}
 	if other["id"] != owner.roomID || other["is_owner"] != false || other["member_count"] != float64(2) ||
 		other["status"] != "open" || other["capacity"] == nil {
 		t.Fatalf("joined room = %v", other)

@@ -137,6 +137,9 @@ func TestRegen_HTTP(t *testing.T) {
 	if len(d["code"].(string)) != 8 || d["expires_at"] == nil {
 		t.Fatalf("data = %v", d)
 	}
+	if got := a.roomsOf(t, owner)[0].(map[string]any)["regen_remaining_today"]; got != float64(2) {
+		t.Fatalf("regen_remaining_today after one regen = %v, want 2", got)
+	}
 
 	reason := func(t *testing.T, owner member) any {
 		t.Helper()

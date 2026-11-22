@@ -127,7 +127,7 @@ func main() {
 			RegenDailyLimit: cfg.OwnerRegenDailyLimit,
 			LifetimeCap:     cfg.RewardCodeLifetimeCap,
 		}, time.Now)
-	roomHandler := handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn).WithManage(manageSvc)
+	roomHandler := handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms, users, codes, cfg.OwnerRegenDailyLimit, time.Now), authn).WithManage(manageSvc)
 	codeHandler := handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn)
 	// Upgrades are limited per IP (generous: carrier NAT shares IPs) and per
 	// user; the socket itself closes when the access token expires.

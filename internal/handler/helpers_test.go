@@ -106,7 +106,7 @@ func newApp(t *testing.T, counter ratelimit.Counter) *app {
 		handler.NewAuthHandler(authSvc, true, idtoken.NotConfiguredVerifier{}, idtoken.NotConfiguredVerifier{}).
 			WithLoginLimit(middleware.RateLimitIP(counter, "login", 10, time.Minute)),
 		handler.NewUserHandler(userSvc, authn),
-		handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms), authn).WithManage(manageSvc),
+		handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms, users, codes, 3, time.Now), authn).WithManage(manageSvc),
 		handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn),
 		handler.NewConfigHandler(authn),
 		handler.NewChatHandler(chatSvc, authn,

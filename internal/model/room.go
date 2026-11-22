@@ -41,6 +41,8 @@ type RoomDetail struct {
 	RoomSummary
 	IsOwner bool         `json:"is_owner"`
 	Members []MemberInfo `json:"members"`
+	// RegenRemainingToday is set on the caller's own room only; null elsewhere.
+	RegenRemainingToday *int `json:"regen_remaining_today"`
 }
 
 type JoinResult struct {
