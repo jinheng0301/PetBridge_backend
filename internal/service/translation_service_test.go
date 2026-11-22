@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -156,6 +157,58 @@ func TestTranslate_GroupsByLanguage(t *testing.T) {
 	}
 	if n := len(e.pub.all()); n != 3 {
 		t.Fatalf("events = %d, want 3", n)
+	}
+}
+
+// failingSetStore fails SetTranslation from call number failAt on.
+type failingSetStore struct {
+	MessageStore
+	mu     sync.Mutex
+	calls  int
+	failAt int
+}
+
+func (f *failingSetStore) SetTranslation(ctx context.Context, id string, base *string, status string, at time.Time) (bool, error) {
+	f.mu.Lock()
+	f.calls++
+	n := f.calls
+	f.mu.Unlock()
+	if n >= f.failAt {
+		return false, errors.New("db down")
+	}
+	return f.MessageStore.SetTranslation(ctx, id, base, status, at)
+}
+
+// A DB error mid-loop still announces the rows this run already set done.
+func TestTranslate_SetErrorStillPublishesChanged(t *testing.T) {
+	e := newTranslateEnv(t)
+	k1, k2 := e.seat(t, "k1@example.com", 2), e.seat(t, "k2@example.com", 3)
+	msg := e.message(t, map[string]string{k1: "ko", k2: "ko"})
+	e.svc.store = &failingSetStore{MessageStore: e.repo, failAt: 2}
+
+	if err := e.svc.Process(bg, msg); err == nil {
+		t.Fatal("want error from SetTranslation")
+	}
+	done := 0
+	for _, u := range []string{k1, k2} {
+		st, _ := e.status(t, msg, u)
+		evs := e.translatedTo(u)
+		switch st {
+		case model.TranslationDone:
+			done++
+			if len(evs) != 1 {
+				t.Fatalf("done receiver got %d events, want 1", len(evs))
+			}
+		case model.TranslationPending:
+			if len(evs) != 0 {
+				t.Fatalf("pending receiver got %d events", len(evs))
+			}
+		default:
+			t.Fatalf("status %s", st)
+		}
+	}
+	if done != 1 {
+		t.Fatalf("done rows = %d, want 1", done)
 	}
 }
 
