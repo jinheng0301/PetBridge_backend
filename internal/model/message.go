@@ -71,13 +71,13 @@ type Recipient struct {
 
 // PendingDelivery is a delivery waiting for translation.
 type PendingDelivery struct {
-	ID, ReceiverID, TargetLang string
+	ID, ReceiverID, TargetLang, PolishStatus string
 }
 
 // TranslationWork is the input of one translation task for a message.
 type TranslationWork struct {
-	MessageID, RoomID, SrcLang, Body string
-	Pending                          []PendingDelivery
+	MessageID, RoomID, SenderID, SrcLang, Body string
+	Pending                                    []PendingDelivery
 }
 
 // NewMessage is the input for inserting a message row.
@@ -96,7 +96,28 @@ type NewDelivery struct {
 	BaseText                        *string
 	TranslationStatus, PolishStatus string
 	PolishBy                        *string
+	PolishedText                    *string
 }
+
+// PolishWork is the input of one polish task, and what the polish button checks.
+type PolishWork struct {
+	DeliveryID, MessageID, RoomID, SenderID, ReceiverID, Kind, SrcLang, Body, TargetLang string
+	BaseText                                                                             *string
+	TranslationStatus, PolishStatus                                                      string
+	PolishBy                                                                             *string
+	ReceiverMBTI                                                                         string // "" when unset
+}
+
+// PolishGiveUp is a pending polish set to fallback because its translation gave up.
+type PolishGiveUp struct {
+	DeliveryID, MessageID, RoomID, ReceiverID string
+}
+
+// ai_usage_daily kinds.
+const (
+	UsageTranslate = "translate"
+	UsagePolish    = "polish"
+)
 
 // History page size: default when the client gives none, and the hard maximum.
 const (

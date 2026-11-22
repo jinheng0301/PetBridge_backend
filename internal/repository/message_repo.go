@@ -83,9 +83,9 @@ func (r *MessageRepo) InsertDeliveries(ctx context.Context, messageID string, ds
 	db := conn(ctx, r.pool)
 	for _, d := range ds {
 		if _, err := db.Exec(ctx, `
-			insert into deliveries(message_id, receiver_id, target_lang, base_text, translation_status, polish_status, polish_by)
-			values($1,$2,$3,$4,$5,$6,$7)`,
-			messageID, d.ReceiverID, d.TargetLang, d.BaseText, d.TranslationStatus, d.PolishStatus, d.PolishBy); err != nil {
+			insert into deliveries(message_id, receiver_id, target_lang, base_text, translation_status, polish_status, polish_by, polished_text)
+			values($1,$2,$3,$4,$5,$6,$7,$8)`,
+			messageID, d.ReceiverID, d.TargetLang, d.BaseText, d.TranslationStatus, d.PolishStatus, d.PolishBy, d.PolishedText); err != nil {
 			return err
 		}
 	}
@@ -203,8 +203,8 @@ func (r *MessageRepo) TranslationWork(ctx context.Context, messageID string) (mo
 	}
 	db := conn(ctx, r.pool)
 	var w model.TranslationWork
-	err := db.QueryRow(ctx, `select id::text, room_id::text, src_lang, body from messages where id = $1`, messageID).
-		Scan(&w.MessageID, &w.RoomID, &w.SrcLang, &w.Body)
+	err := db.QueryRow(ctx, `select id::text, room_id::text, sender_id::text, src_lang, body from messages where id = $1`, messageID).
+		Scan(&w.MessageID, &w.RoomID, &w.SenderID, &w.SrcLang, &w.Body)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.TranslationWork{}, model.ErrNotFound
 	}
@@ -212,7 +212,7 @@ func (r *MessageRepo) TranslationWork(ctx context.Context, messageID string) (mo
 		return model.TranslationWork{}, err
 	}
 	rows, err := db.Query(ctx, `
-		select id::text, receiver_id::text, target_lang from deliveries
+		select id::text, receiver_id::text, target_lang, polish_status from deliveries
 		where message_id = $1 and translation_status <> 'done' order by id`, messageID)
 	if err != nil {
 		return model.TranslationWork{}, err
@@ -220,7 +220,7 @@ func (r *MessageRepo) TranslationWork(ctx context.Context, messageID string) (mo
 	defer rows.Close()
 	for rows.Next() {
 		var p model.PendingDelivery
-		if err := rows.Scan(&p.ID, &p.ReceiverID, &p.TargetLang); err != nil {
+		if err := rows.Scan(&p.ID, &p.ReceiverID, &p.TargetLang, &p.PolishStatus); err != nil {
 			return model.TranslationWork{}, err
 		}
 		w.Pending = append(w.Pending, p)
@@ -268,4 +268,103 @@ func (r *MessageRepo) StuckTranslations(ctx context.Context, now time.Time, pend
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// PolishWork reads one delivery with its message and the receiver's MBTI.
+func (r *MessageRepo) PolishWork(ctx context.Context, deliveryID string) (model.PolishWork, error) {
+	if !uuidRE.MatchString(deliveryID) {
+		return model.PolishWork{}, model.ErrNotFound
+	}
+	var w model.PolishWork
+	err := conn(ctx, r.pool).QueryRow(ctx, `
+		select d.id::text, m.id::text, m.room_id::text, m.sender_id::text, d.receiver_id::text, m.kind, m.src_lang, m.body,
+		       d.target_lang, d.base_text, d.translation_status, d.polish_status, d.polish_by::text, coalesce(u.mbti, '')
+		from deliveries d join messages m on m.id = d.message_id join users u on u.id = d.receiver_id
+		where d.id = $1`, deliveryID).
+		Scan(&w.DeliveryID, &w.MessageID, &w.RoomID, &w.SenderID, &w.ReceiverID, &w.Kind, &w.SrcLang, &w.Body,
+			&w.TargetLang, &w.BaseText, &w.TranslationStatus, &w.PolishStatus, &w.PolishBy, &w.ReceiverMBTI)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.PolishWork{}, model.ErrNotFound
+	}
+	return w, err
+}
+
+// SetPolish records a polish result while the row is still pending.
+func (r *MessageRepo) SetPolish(ctx context.Context, deliveryID string, polished *string, status string, now time.Time) (bool, error) {
+	if !uuidRE.MatchString(deliveryID) {
+		return false, nil
+	}
+	tag, err := conn(ctx, r.pool).Exec(ctx, `
+		update deliveries set polished_text = $2, polish_status = $3, updated_at = $4
+		where id = $1 and polish_status = 'pending'`, deliveryID, polished, status, now)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ClaimPolish moves the receiver's own row from none to pending.
+func (r *MessageRepo) ClaimPolish(ctx context.Context, deliveryID, receiverID string, now time.Time) (bool, error) {
+	if !uuidRE.MatchString(deliveryID) || !uuidRE.MatchString(receiverID) {
+		return false, nil
+	}
+	tag, err := conn(ctx, r.pool).Exec(ctx, `
+		update deliveries set polish_status = 'pending', polish_by = $2, updated_at = $3
+		where id = $1 and receiver_id = $2 and polish_status = 'none'`, deliveryID, receiverID, now)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// StuckPolishes lists pending polishes whose translation is done and that were not touched for pendingAfter.
+func (r *MessageRepo) StuckPolishes(ctx context.Context, now time.Time, pendingAfter time.Duration, limit int) ([]string, error) {
+	rows, err := conn(ctx, r.pool).Query(ctx, `
+		select id::text from deliveries
+		where polish_status = 'pending' and translation_status = 'done' and updated_at < $1::timestamptz - $2::interval
+		order by updated_at, id
+		limit $3`, now, pendingAfter, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// GiveUpPolishes sets fallback on pending polishes whose translation failed for good.
+func (r *MessageRepo) GiveUpPolishes(ctx context.Context, now time.Time, giveUpAfter time.Duration, limit int) ([]model.PolishGiveUp, error) {
+	rows, err := conn(ctx, r.pool).Query(ctx, `
+		with picked as (
+			select d.id from deliveries d join messages m on m.id = d.message_id
+			where d.polish_status = 'pending' and d.translation_status = 'failed'
+			  and m.created_at < $1::timestamptz - $2::interval
+			order by m.created_at, d.id
+			limit $3
+			for update of d skip locked
+		)
+		update deliveries d set polish_status = 'fallback', updated_at = $1
+		from picked, messages m
+		where d.id = picked.id and m.id = d.message_id
+		returning d.id::text, m.id::text, m.room_id::text, d.receiver_id::text`, now, giveUpAfter, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.PolishGiveUp
+	for rows.Next() {
+		var g model.PolishGiveUp
+		if err := rows.Scan(&g.DeliveryID, &g.MessageID, &g.RoomID, &g.ReceiverID); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
 }

@@ -64,6 +64,17 @@ func TestMigrateUp_Idempotent(t *testing.T) {
 	}
 }
 
+func TestMigrateUp_CreatesAIUsageDaily(t *testing.T) {
+	p := dbtest.Reset(t)
+	var n int
+	if err := p.QueryRow(bg, `select count(*) from information_schema.columns where table_name='ai_usage_daily'`).Scan(&n); err != nil || n != 7 {
+		t.Fatalf("ai_usage_daily columns=%d err=%v", n, err)
+	}
+	u := newUser(t, p)
+	_, err := p.Exec(bg, `insert into ai_usage_daily values('2026-11-22',$1,'other',1,0,0,0)`, u)
+	wantState(t, err, "23514") // kind check
+}
+
 func TestMigrateDownThenUp_RoundTrip(t *testing.T) {
 	p := dbtest.Reset(t)
 	for i := 0; i < 10; i++ { // roll back every migration, not just the latest
@@ -202,8 +213,8 @@ func TestMigration0003_AddsRewardForColumn(t *testing.T) {
 	if err != nil || refs != 1 {
 		t.Fatalf("self-referencing fk count=%d err=%v", refs, err)
 	}
-	// 0004 is the latest migration now: roll it back first, then 0003.
-	for i := 0; i < 2; i++ {
+	// 0005 is the latest migration now: roll back 0005 and 0004 first, then 0003.
+	for i := 0; i < 3; i++ {
 		if err := db.MigrateDown(bg, dbtest.URL()); err != nil {
 			t.Fatal(err)
 		}

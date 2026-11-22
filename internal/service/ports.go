@@ -138,4 +138,21 @@ type MessageStore interface {
 	SetTranslation(ctx context.Context, deliveryID string, baseText *string, status string, now time.Time) (changed bool, err error)
 	// StuckTranslations returns ids (distinct) of messages whose translation must be re-run (spec 5.5 sweep, first two rules).
 	StuckTranslations(ctx context.Context, now time.Time, pendingAfter, failedEvery, giveUpAfter time.Duration, limit int) ([]string, error)
+
+	// PolishWork reads one delivery with its message and the receiver's MBTI; missing or invalid id returns model.ErrNotFound.
+	PolishWork(ctx context.Context, deliveryID string) (model.PolishWork, error)
+	// SetPolish only touches polish_status='pending' rows: writes polished_text, status, updated_at; changed=false means no longer pending.
+	SetPolish(ctx context.Context, deliveryID string, polished *string, status string, now time.Time) (changed bool, err error)
+	// ClaimPolish moves the receiver's own row from none to pending with polish_by=receiver; claimed=false when it was not none.
+	ClaimPolish(ctx context.Context, deliveryID, receiverID string, now time.Time) (claimed bool, err error)
+	// StuckPolishes returns ids of deliveries whose polish is pending, translation done, and not touched for pendingAfter; oldest first.
+	StuckPolishes(ctx context.Context, now time.Time, pendingAfter time.Duration, limit int) ([]string, error)
+	// GiveUpPolishes sets pending polishes to fallback when the translation failed and the message is older than giveUpAfter; returns the rows changed.
+	GiveUpPolishes(ctx context.Context, now time.Time, giveUpAfter time.Duration, limit int) ([]model.PolishGiveUp, error)
+}
+
+// UsageStore records real AI calls per user and day (ai_usage_daily).
+type UsageStore interface {
+	// Add accumulates into (UTC date of day, userID, kind); calls == 0 writes nothing.
+	Add(ctx context.Context, day time.Time, userID, kind string, calls int, in, out, costMicros int64) error
 }
