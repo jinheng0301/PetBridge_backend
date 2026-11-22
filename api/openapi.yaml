@@ -260,7 +260,7 @@ paths:
       summary: Rooms I am in
       description: >
         Every room the caller is an active member of, own room first. Members who left are not listed.
-        [] before onboarding.
+        The own room carries regen_remaining_today. [] before onboarding.
       security: [{ bearerAuth: [] }]
       responses:
         '200':
@@ -818,7 +818,7 @@ components:
         room: { $ref: '#/components/schemas/RoomSummary' }
     RoomDetail:
       type: object
-      required: [id, is_owner, status, member_count, capacity, members]
+      required: [id, is_owner, status, member_count, capacity, members, regen_remaining_today]
       properties:
         id: { type: string, format: uuid }
         is_owner: { type: boolean }
@@ -828,6 +828,15 @@ components:
         members:
           type: array
           items: { $ref: '#/components/schemas/MemberInfo' }
+        regen_remaining_today:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: >
+            Own room only (is_owner true): OWNER_REGEN_DAILY_LIMIT minus the owner_regen codes issued today
+            in the owner's time zone, never below 0; null for rooms joined from others. Covers the daily limit
+            only: room_full, enough_unused and lifetime_limit still come from POST /rooms/{id}/codes, which
+            stays authoritative. Not part of room.snapshot.
     CodeListItem:
       type: object
       required: [code, source, status, expires_at, room]
