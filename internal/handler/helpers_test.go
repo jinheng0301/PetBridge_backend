@@ -131,7 +131,9 @@ func newAppQuota(t *testing.T, counter ratelimit.Counter, polishDaily int) *app 
 		handler.NewChatHandler(chatSvc, authn,
 			middleware.RateLimitUser(counter, "msg", 20, time.Minute),
 			middleware.RateLimitUser(counter, "msgday", 1000, 24*time.Hour)),
-		handler.NewBlockHandler(service.NewBlockService(users, repository.NewBlockRepo(pool)), authn))
+		handler.NewBlockHandler(service.NewBlockService(users, repository.NewBlockRepo(pool)), authn),
+		handler.NewReportHandler(service.NewReportService(users, repository.NewRoomMemberRepo(pool),
+			repository.NewReportRepo(pool), time.Now, logger.New("debug", logs)), authn))
 	return &app{r: r, pool: pool, logs: logs}
 }
 
