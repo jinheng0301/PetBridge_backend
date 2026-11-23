@@ -28,6 +28,7 @@ type TranslationService struct {
 	usage   UsageStore   // nil: usage is not recorded
 	pq      PolishQueue  // nil: pending polishes are left for the sweep
 	flags   ModFlagStore // nil: no review-queue rows are written
+	blocks  BlockStore   // nil: blocks are not applied
 	now     func() time.Time
 	log     *slog.Logger
 }
@@ -35,6 +36,12 @@ type TranslationService struct {
 // WithModFlags records flagged translations in the review queue (spec 5.3).
 func (s *TranslationService) WithModFlags(f ModFlagStore) *TranslationService {
 	s.flags = f
+	return s
+}
+
+// WithBlocks skips events to receivers who have a block with the sender (spec 6.3).
+func (s *TranslationService) WithBlocks(b BlockStore) *TranslationService {
+	s.blocks = b
 	return s
 }
 
@@ -248,14 +255,15 @@ func (s *TranslationService) publish(ctx context.Context, w model.TranslationWor
 			s.log.Warn("translation member check failed", "message_id", w.MessageID, "user_id", uid, "err", err)
 			continue
 		}
-		if !active {
+		if !active || s.blocked(ctx, w, uid) {
 			continue
 		}
 		s.pub.Publish(ctx, messageEvent(EventMessageTranslated, v, uid))
 	}
 }
 
-// publishRemoved sends message.removed to each receiver still seated in the room.
+// publishRemoved sends message.removed to each receiver still seated in the
+// room that has no block with the sender.
 func (s *TranslationService) publishRemoved(ctx context.Context, w model.TranslationWork, receivers []string) {
 	for _, uid := range receivers {
 		active, err := s.members.IsActiveMember(ctx, w.RoomID, uid)
@@ -263,10 +271,21 @@ func (s *TranslationService) publishRemoved(ctx context.Context, w model.Transla
 			s.log.Warn("translation member check failed", "message_id", w.MessageID, "user_id", uid, "err", err)
 			continue
 		}
-		if active {
+		if active && !s.blocked(ctx, w, uid) {
 			s.pub.Publish(ctx, messageRemovedEvent(w.RoomID, w.MessageID, uid))
 		}
 	}
+}
+
+// blocked reports a block either way between the sender and receiver (spec
+// 6.3). A failed check counts as blocked: an event is never worth a leak.
+func (s *TranslationService) blocked(ctx context.Context, w model.TranslationWork, receiverID string) bool {
+	b, err := blockedBetween(ctx, s.blocks, w.SenderID, receiverID)
+	if err != nil {
+		s.log.Warn("translation block check failed", "message_id", w.MessageID, "user_id", receiverID, "err", err)
+		return true
+	}
+	return b
 }
 
 // inlineRunTimeout bounds one in-process translation run.

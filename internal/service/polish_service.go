@@ -28,6 +28,7 @@ type PolishService struct {
 	usage   UsageStore
 	pub     Publisher
 	flags   ModFlagStore // nil: no review-queue rows are written
+	blocks  BlockStore   // nil: blocks are not applied
 	now     func() time.Time
 	log     *slog.Logger
 }
@@ -35,6 +36,13 @@ type PolishService struct {
 // WithModFlags records flagged polish results in the review queue (spec 5.3).
 func (s *PolishService) WithModFlags(f ModFlagStore) *PolishService {
 	s.flags = f
+	return s
+}
+
+// WithBlocks falls back polishes between users with a block and skips
+// their events (spec 6.3).
+func (s *PolishService) WithBlocks(b BlockStore) *PolishService {
+	s.blocks = b
 	return s
 }
 
@@ -56,6 +64,20 @@ func (s *PolishService) Process(ctx context.Context, deliveryID string) error {
 	if w.ModStatus == model.ModBlock {
 		// The copy is hidden from its receiver (spec 5.8): give the polish up
 		// without calling the model and without telling anyone.
+		if w.PolishStatus == model.PolishPending {
+			if _, err := s.store.SetPolish(ctx, w.DeliveryID, nil, model.PolishFallback, s.now()); err != nil {
+				return fmt.Errorf("set polish: %w", err)
+			}
+		}
+		return nil
+	}
+	// A copy between users with a block either way is never shown (spec
+	// 6.3): give it up the same way, with no model call and no event.
+	blocked, err := blockedBetween(ctx, s.blocks, w.SenderID, w.ReceiverID)
+	if err != nil {
+		return fmt.Errorf("block check: %w", err)
+	}
+	if blocked {
 		if w.PolishStatus == model.PolishPending {
 			if _, err := s.store.SetPolish(ctx, w.DeliveryID, nil, model.PolishFallback, s.now()); err != nil {
 				return fmt.Errorf("set polish: %w", err)
@@ -145,7 +167,9 @@ func (s *PolishService) recordUsage(ctx context.Context, w model.PolishWork, out
 	}
 }
 
-// publish sends message.polished to the receiver when still seated.
+// publish sends message.polished to the receiver when still seated and with
+// no block either way with the sender (read from the views, as GiveUp rows
+// carry no sender). A failed block check publishes nothing.
 func (s *PolishService) publish(ctx context.Context, messageID, roomID, receiverID string) {
 	active, err := s.members.IsActiveMember(ctx, roomID, receiverID)
 	if err != nil {
@@ -162,7 +186,16 @@ func (s *PolishService) publish(ctx context.Context, messageID, roomID, receiver
 		}
 		return
 	}
-	if v, ok := views.Receivers[receiverID]; ok {
+	v, ok := views.Receivers[receiverID]
+	if !ok {
+		return
+	}
+	blocked, err := blockedBetween(ctx, s.blocks, views.Sender.Sender.UserID, receiverID)
+	if err != nil {
+		s.log.Warn("polish block check failed", "message_id", messageID, "err", err)
+		return
+	}
+	if !blocked {
 		s.pub.Publish(ctx, messageEvent(EventMessagePolished, v, receiverID))
 	}
 }

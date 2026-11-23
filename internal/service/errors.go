@@ -28,6 +28,8 @@ var (
 	ErrDeliveryNotFound = errors.New("delivery not found")
 	ErrPolishNotReady   = errors.New("polish not ready")
 
+	ErrBlockLimit = errors.New("block limit reached")
+
 	ErrAIUnavailable    = errors.New("ai: every provider failed")
 	ErrAIBudgetExceeded = errors.New("ai: daily hard cap reached")
 )

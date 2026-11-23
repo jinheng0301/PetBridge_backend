@@ -49,6 +49,7 @@ type ChatService struct {
 	quota   PolishQuota // nil until WithPolish: polish requests are ignored
 	pq      PolishQueue
 	flags   ModFlagStore // nil: no review-queue rows are written
+	blocks  BlockStore   // nil: blocks are not applied
 	now     func() time.Time
 	log     *slog.Logger
 }
@@ -56,6 +57,12 @@ type ChatService struct {
 // WithModFlags records flagged outgoing messages in the review queue (spec 5.3).
 func (s *ChatService) WithModFlags(f ModFlagStore) *ChatService {
 	s.flags = f
+	return s
+}
+
+// WithBlocks applies user blocks to sending and the polish button (spec 6.3).
+func (s *ChatService) WithBlocks(b BlockStore) *ChatService {
+	s.blocks = b
 	return s
 }
 
@@ -125,6 +132,12 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 				receivers = append(receivers, r)
 			}
 		}
+	}
+	// Receivers with a block either way get no delivery and no event (spec
+	// 6.3). A DM to such a peer is still stored and answered as sent, with no
+	// delivery at all, so the sender cannot tell.
+	if receivers, err = s.dropBlocked(ctx, userID, receivers); err != nil {
+		return model.MessageView{}, err
 	}
 
 	var phraseID *string
@@ -253,6 +266,31 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 	return views.Sender, nil
 }
 
+// dropBlocked removes the receivers that have a block with the sender in either direction.
+func (s *ChatService) dropBlocked(ctx context.Context, senderID string, receivers []model.Recipient) ([]model.Recipient, error) {
+	if s.blocks == nil || len(receivers) == 0 {
+		return receivers, nil
+	}
+	ids := make([]string, len(receivers))
+	for i, r := range receivers {
+		ids[i] = r.UserID
+	}
+	blocked, err := s.blocks.BlockedAmong(ctx, senderID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("blocked receivers: %w", err)
+	}
+	if len(blocked) == 0 {
+		return receivers, nil
+	}
+	kept := make([]model.Recipient, 0, len(receivers))
+	for _, r := range receivers {
+		if !blocked[r.UserID] {
+			kept = append(kept, r)
+		}
+	}
+	return kept, nil
+}
+
 // senderPolish decides the sender toggle: text only, free for very short
 // text, otherwise one charge to the sender. Running out of quota does not
 // refuse the message (polish_requested=false tells the client why).
@@ -303,6 +341,14 @@ func (s *ChatService) Polish(ctx context.Context, userID, deliveryID string) (mo
 	// before the claim: ClaimPolish does not look at mod_status, and the
 	// charge must not happen (spec 5.8).
 	if !seated || w.ModStatus == model.ModBlock {
+		return model.MessageView{}, ErrDeliveryNotFound
+	}
+	// Nor does a copy from someone with a block either way (spec 6.3).
+	blocked, err := blockedBetween(ctx, s.blocks, w.SenderID, userID)
+	if err != nil {
+		return model.MessageView{}, fmt.Errorf("block check: %w", err)
+	}
+	if blocked {
 		return model.MessageView{}, ErrDeliveryNotFound
 	}
 	if w.PolishStatus != model.PolishNone {

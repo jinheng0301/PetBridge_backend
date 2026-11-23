@@ -161,7 +161,8 @@ func (r *MessageRepo) ListForViewer(ctx context.Context, roomID, viewerID string
 		from messages m
 		join users u on u.id = m.sender_id
 		left join deliveries d on d.message_id = m.id and d.receiver_id = $2 and d.mod_status <> 'block'
-		where m.room_id = $1 and (m.sender_id = $2 or d.id is not null)`+cond+`
+		where m.room_id = $1 and (m.sender_id = $2 or d.id is not null)
+		and not exists (select 1 from blocks b where (b.blocker_id = $2 and b.blocked_id = m.sender_id) or (b.blocker_id = m.sender_id and b.blocked_id = $2))`+cond+`
 		order by m.id `+order+` limit $3`, args...)
 	if err != nil {
 		return nil, false, err
