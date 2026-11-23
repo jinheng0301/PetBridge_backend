@@ -32,6 +32,7 @@ const (
 	CodeDeliveryNotFound = "DELIVERY_NOT_FOUND"
 	CodePolishNotReady   = "POLISH_NOT_READY"
 	CodeQuotaExceeded    = "QUOTA_EXCEEDED"
+	CodeContentBlocked   = "CONTENT_BLOCKED"
 )
 
 // ErrNotFound is returned by repositories when a row does not exist.

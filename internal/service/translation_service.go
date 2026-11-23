@@ -25,10 +25,17 @@ type TranslationService struct {
 	tr      Translator
 	mod     Moderator
 	pub     Publisher
-	usage   UsageStore  // nil: usage is not recorded
-	pq      PolishQueue // nil: pending polishes are left for the sweep
+	usage   UsageStore   // nil: usage is not recorded
+	pq      PolishQueue  // nil: pending polishes are left for the sweep
+	flags   ModFlagStore // nil: no review-queue rows are written
 	now     func() time.Time
 	log     *slog.Logger
+}
+
+// WithModFlags records flagged translations in the review queue (spec 5.3).
+func (s *TranslationService) WithModFlags(f ModFlagStore) *TranslationService {
+	s.flags = f
+	return s
 }
 
 // WithUsage records each real translation call in ai_usage_daily under the sender.
@@ -51,6 +58,11 @@ func NewTranslationService(store MessageStore, members RoomMemberStore, tr Trans
 // Process translates every delivery of the message that is not done yet, once
 // per target language. It returns non-nil when any language failed so the
 // queue retries; the daily hard cap is not a failure (retrying cannot help).
+//
+// Each translation is moderated (spec 5.5): review stores it with a flag;
+// block hides that language group from its receivers (message.removed instead
+// of message.translated); when the model itself rated it block, the whole
+// message is withdrawn from every receiver and the run stops.
 func (s *TranslationService) Process(ctx context.Context, messageID string) error {
 	w, err := s.store.TranslationWork(ctx, messageID)
 	if errors.Is(err, model.ErrNotFound) {
@@ -74,44 +86,102 @@ func (s *TranslationService) Process(ctx context.Context, messageID string) erro
 	}
 
 	var failure error
-	var changed []string // receiver ids whose row this run changed
+	var changed []string // receiver ids whose row this run set translated
+	var removed []string // receiver ids whose row this run hid
+	var polish []string  // delivery ids whose waiting polish can start now
+	// announce publishes what this run changed and hands the ready polishes to
+	// the queue. Enqueueing waits for the end of the run so a later group's
+	// withdrawal never leaves a polish of a withdrawn message running.
+	announce := func() {
+		if len(changed) > 0 {
+			s.publish(ctx, w, changed)
+		}
+		if len(removed) > 0 {
+			s.publishRemoved(ctx, w, removed)
+		}
+		for _, id := range polish {
+			s.enqueuePolish(ctx, id)
+		}
+	}
 	for _, lang := range langs {
-		text, status, gerr := s.translate(ctx, w, lang)
+		text, status, modStatus, res, gerr := s.translate(ctx, w, lang)
 		if gerr != nil {
 			failure = gerr
+		}
+		if res.Model == ModBlock {
+			// The model judged the source itself unsafe: withdraw the whole
+			// message. Its remaining groups are not translated, and receivers
+			// this run already changed get message.removed instead.
+			if err := s.withdraw(ctx, w, lang, res); err != nil {
+				announce()
+				return err
+			}
+			return nil
 		}
 		var base *string
 		if status == model.TranslationDone {
 			base = &text
 		}
 		for _, d := range groups[lang] {
-			ok, err := s.store.SetTranslation(ctx, d.ID, base, status, model.ModOK, s.now())
+			ok, err := s.store.SetTranslation(ctx, d.ID, base, status, modStatus, s.now())
 			if err != nil {
 				// Rows already set done in this run are not pending any more, so a
 				// retry would never announce them: publish them before failing.
-				if len(changed) > 0 {
-					s.publish(ctx, w, changed)
-				}
+				announce()
 				return fmt.Errorf("set translation: %w", err)
 			}
-			if ok {
-				changed = append(changed, d.ReceiverID)
-				if status == model.TranslationDone && d.PolishStatus == model.PolishPending {
-					s.enqueuePolish(ctx, d.ID)
+			if !ok {
+				continue
+			}
+			if modStatus != model.ModOK {
+				f := newFlag(model.StageTranslation, res, w.SenderID)
+				f.RoomID, f.MessageID, f.DeliveryID, f.TargetLang = &w.RoomID, &w.MessageID, &d.ID, &lang
+				recordFlag(ctx, s.flags, s.log, f)
+			}
+			if modStatus == model.ModBlock {
+				// Hidden from this receiver: a waiting polish will never be shown.
+				// If this write fails, the sweep re-enqueues the polish and the
+				// polish task falls it back without calling the model.
+				removed = append(removed, d.ReceiverID)
+				if d.PolishStatus == model.PolishPending {
+					if _, err := s.store.SetPolish(ctx, d.ID, nil, model.PolishFallback, s.now()); err != nil {
+						s.log.Warn("hidden delivery polish fallback failed", "delivery_id", d.ID, "err", err)
+					}
 				}
+				continue
+			}
+			changed = append(changed, d.ReceiverID)
+			if status == model.TranslationDone && d.PolishStatus == model.PolishPending {
+				polish = append(polish, d.ID)
 			}
 		}
 	}
 
-	if len(changed) > 0 {
-		s.publish(ctx, w, changed)
-	}
+	announce()
 	return failure
 }
 
-// translate runs one language. It returns the status to store and an error
-// only when the queue should retry.
-func (s *TranslationService) translate(ctx context.Context, w model.TranslationWork, lang string) (string, string, error) {
+// withdraw hides the message from every receiver (spec 5.5, model block):
+// one statement marks it and all its deliveries blocked, then each receiver
+// still seated gets message.removed, and one flag covers the message.
+func (s *TranslationService) withdraw(ctx context.Context, w model.TranslationWork, lang string, res ModResult) error {
+	receivers, err := s.store.WithdrawMessage(ctx, w.MessageID, s.now())
+	if err != nil {
+		return fmt.Errorf("withdraw message: %w", err)
+	}
+	s.log.Info("message withdrawn by moderation", "message_id", w.MessageID, "target_lang", lang, "source", res.Source)
+	f := newFlag(model.StageTranslation, res, w.SenderID)
+	f.RoomID, f.MessageID, f.TargetLang = &w.RoomID, &w.MessageID, &lang
+	recordFlag(ctx, s.flags, s.log, f)
+	s.publishRemoved(ctx, w, receivers)
+	return nil
+}
+
+// translate runs one language. It returns the text, status and mod_status to
+// store with the moderation result, and an error only when the queue should
+// retry. Failed translations are not moderated (the receiver keeps the
+// source, which passed the outgoing check).
+func (s *TranslationService) translate(ctx context.Context, w model.TranslationWork, lang string) (string, string, string, ModResult, error) {
 	out, err := s.tr.Translate(ctx, llm.TranslateRequest{Text: w.Body, SrcLang: w.SrcLang, TgtLang: lang})
 	s.recordUsage(ctx, w, out)
 	text, risk := out.Text, out.Risk
@@ -119,21 +189,21 @@ func (s *TranslationService) translate(ctx context.Context, w model.TranslationW
 	case errors.Is(err, ErrAIBudgetExceeded):
 		s.log.Error("translation stopped: daily hard cap reached",
 			"message_id", w.MessageID, "target_lang", lang)
-		return "", model.TranslationFailed, nil
+		return "", model.TranslationFailed, model.ModOK, ModResult{}, nil
 	case err != nil:
 		s.log.Warn("translation failed", "message_id", w.MessageID, "target_lang", lang, "err", err)
-		return "", model.TranslationFailed, fmt.Errorf("translate %s: %w", lang, err)
+		return "", model.TranslationFailed, model.ModOK, ModResult{}, fmt.Errorf("translate %s: %w", lang, err)
 	}
 	res, err := s.mod.CheckTranslated(ctx, text, lang, risk)
 	if err != nil {
 		s.log.Warn("translation moderation failed", "message_id", w.MessageID, "target_lang", lang, "err", err)
-		return "", model.TranslationFailed, fmt.Errorf("moderate %s: %w", lang, err)
+		return "", model.TranslationFailed, model.ModOK, ModResult{}, fmt.Errorf("moderate %s: %w", lang, err)
 	}
 	if res.Verdict != ModPass {
-		// B5 has no hidden state for deliveries; B6 decides what review/block do.
-		s.log.Info("translation flagged by moderation", "message_id", w.MessageID, "target_lang", lang, "verdict", int(res.Verdict))
+		s.log.Info("translation flagged by moderation", "message_id", w.MessageID, "target_lang", lang,
+			"verdict", verdictStatus(res.Verdict), "source", res.Source, "terms", len(res.Terms))
 	}
-	return text, model.TranslationDone, nil
+	return text, model.TranslationDone, verdictStatus(res.Verdict), res, nil
 }
 
 func (s *TranslationService) recordUsage(ctx context.Context, w model.TranslationWork, out AIOutcome) {
@@ -182,6 +252,20 @@ func (s *TranslationService) publish(ctx context.Context, w model.TranslationWor
 			continue
 		}
 		s.pub.Publish(ctx, messageEvent(EventMessageTranslated, v, uid))
+	}
+}
+
+// publishRemoved sends message.removed to each receiver still seated in the room.
+func (s *TranslationService) publishRemoved(ctx context.Context, w model.TranslationWork, receivers []string) {
+	for _, uid := range receivers {
+		active, err := s.members.IsActiveMember(ctx, w.RoomID, uid)
+		if err != nil {
+			s.log.Warn("translation member check failed", "message_id", w.MessageID, "user_id", uid, "err", err)
+			continue
+		}
+		if active {
+			s.pub.Publish(ctx, messageRemovedEvent(w.RoomID, w.MessageID, uid))
+		}
 	}
 }
 

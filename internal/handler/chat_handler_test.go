@@ -122,3 +122,22 @@ func TestChatHandler_List(t *testing.T) {
 		t.Fatalf("not seated: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestSend_ContentBlocked422(t *testing.T) {
+	a := newApp(t, nil)
+	owner := a.onboarded(t, "a@local", "18_plus")
+	w := call(a.r, "POST", msgPath(owner.roomID),
+		sendBody(map[string]any{"client_msg_id": "c-1", "kind": "text", "text": "zzsecret bad"}), owner.token)
+	if w.Code != 422 || errCode(t, w) != "CONTENT_BLOCKED" {
+		t.Fatalf("send: %d %s", w.Code, w.Body.String())
+	}
+	if _, ok := errOf(t, w)["details"]; ok {
+		t.Fatalf("details present: %s", w.Body.String())
+	}
+	if n := count(t, a.pool, `select count(*) from messages`); n != 0 {
+		t.Fatalf("messages = %d", n)
+	}
+	if strings.Contains(a.logs.String(), "zzsecret") {
+		t.Fatal("message text found in logs")
+	}
+}

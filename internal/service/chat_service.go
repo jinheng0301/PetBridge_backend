@@ -48,8 +48,15 @@ type ChatService struct {
 	pub     Publisher
 	quota   PolishQuota // nil until WithPolish: polish requests are ignored
 	pq      PolishQueue
+	flags   ModFlagStore // nil: no review-queue rows are written
 	now     func() time.Time
 	log     *slog.Logger
+}
+
+// WithModFlags records flagged outgoing messages in the review queue (spec 5.3).
+func (s *ChatService) WithModFlags(f ModFlagStore) *ChatService {
+	s.flags = f
+	return s
 }
 
 // PolishQuota charges one polish to a user; *QuotaService implements it.
@@ -141,13 +148,24 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 		return model.MessageView{}, fmt.Errorf("find replay: %w", err)
 	}
 
-	res, err := s.mod.CheckOutgoing(ctx, body, srcLang)
-	if err != nil {
-		return model.MessageView{}, fmt.Errorf("moderate outgoing: %w", err)
+	// Moderation runs before anything is charged (spec 5.4). Phrases are our
+	// own templates and skip it. A blocked message is not stored, so a retry
+	// with the same client_msg_id is checked (and blocked) again.
+	var res ModResult
+	if in.Kind != model.KindPhrase {
+		if res, err = s.mod.CheckOutgoing(ctx, body, srcLang); err != nil {
+			return model.MessageView{}, fmt.Errorf("moderate outgoing: %w", err)
+		}
 	}
 	if res.Verdict != ModPass {
-		// B5 has no blocked state for messages; B6 decides what review/block do.
-		s.log.Info("outgoing message flagged by moderation", "room_id", roomID, "user_id", userID, "verdict", int(res.Verdict))
+		s.log.Info("outgoing message flagged by moderation", "room_id", roomID, "user_id", userID,
+			"verdict", verdictStatus(res.Verdict), "terms", len(res.Terms))
+	}
+	if res.Verdict == ModBlock {
+		f := newFlag(model.StageOutgoing, res, userID)
+		f.RoomID, f.Text = &roomID, &body
+		recordFlag(ctx, s.flags, s.log, f)
+		return model.MessageView{}, &ContentBlockedError{}
 	}
 
 	id, err := uuid.NewV7()
@@ -159,7 +177,8 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 		return model.MessageView{}, err
 	}
 	m := model.NewMessage{ID: id.String(), RoomID: roomID, SenderID: userID, Scope: in.Scope, ToUserID: toUser,
-		Kind: in.Kind, PhraseID: phraseID, SrcLang: srcLang, Body: body, ClientMsgID: in.ClientMsgID, PolishRequested: polishOn}
+		Kind: in.Kind, PhraseID: phraseID, SrcLang: srcLang, Body: body, ClientMsgID: in.ClientMsgID, PolishRequested: polishOn,
+		ModStatus: verdictStatus(res.Verdict)}
 	var polishBy *string
 	if polishOn {
 		polishBy = &userID
@@ -194,6 +213,11 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 			return model.MessageView{}, fmt.Errorf("replay views: %w", err)
 		}
 		return views.Sender, nil
+	}
+	if res.Verdict == ModReview {
+		f := newFlag(model.StageOutgoing, res, userID)
+		f.RoomID, f.MessageID = &roomID, &m.ID
+		recordFlag(ctx, s.flags, s.log, f)
 	}
 
 	views, err := s.msgs.ViewsOf(ctx, m.ID)
@@ -275,7 +299,10 @@ func (s *ChatService) Polish(ctx context.Context, userID, deliveryID string) (mo
 	if err != nil {
 		return model.MessageView{}, fmt.Errorf("member check: %w", err)
 	}
-	if !seated {
+	// A copy hidden by moderation does not exist for its receiver. This runs
+	// before the claim: ClaimPolish does not look at mod_status, and the
+	// charge must not happen (spec 5.8).
+	if !seated || w.ModStatus == model.ModBlock {
 		return model.MessageView{}, ErrDeliveryNotFound
 	}
 	if w.PolishStatus != model.PolishNone {

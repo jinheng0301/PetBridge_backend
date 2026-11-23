@@ -21,6 +21,7 @@ const (
 	FrameMessageNew        = "message.new"
 	FrameMessageTranslated = "message.translated"
 	FrameMessagePolished   = "message.polished"
+	FrameMessageRemoved    = "message.removed"
 )
 
 // Presence states. Offline members are drawn as a sleeping pet by the client.

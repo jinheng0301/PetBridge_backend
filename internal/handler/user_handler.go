@@ -51,9 +51,12 @@ func (h *UserHandler) onboarding(c *gin.Context) {
 
 func (h *UserHandler) fail(c *gin.Context, err error) {
 	var ve *service.ValidationError
+	var cb *service.ContentBlockedError
 	switch {
 	case errors.As(err, &ve):
 		FailDetails(c, http.StatusBadRequest, model.CodeValidationFailed, "invalid fields", gin.H{"fields": ve.Fields})
+	case errors.As(err, &cb):
+		failContentBlocked(c, cb)
 	case errors.Is(err, service.ErrAccountDisabled):
 		Fail(c, http.StatusForbidden, model.CodeAccountDisabled, "account disabled")
 	case errors.Is(err, service.ErrUserNotFound):

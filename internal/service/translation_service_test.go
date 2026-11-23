@@ -15,11 +15,14 @@ import (
 	"github.com/jinheng0301/petbridge/pkg/llm"
 )
 
-// fakeTranslator returns "<tgt>:<text>" unless err is set, and records every request.
+// fakeTranslator returns "<tgt>:<text>" (or text(tgt) when set) with risk[tgt]
+// (default none) unless err is set, and records every request.
 type fakeTranslator struct {
 	mu    sync.Mutex
 	err   error
 	calls []llm.TranslateRequest
+	risk  map[string]string
+	text  func(lang string) string
 }
 
 func (f *fakeTranslator) Translate(_ context.Context, req llm.TranslateRequest) (AIOutcome, error) {
@@ -29,7 +32,15 @@ func (f *fakeTranslator) Translate(_ context.Context, req llm.TranslateRequest) 
 	if f.err != nil {
 		return AIOutcome{}, f.err
 	}
-	return AIOutcome{Text: req.TgtLang + ":" + req.Text, Risk: llm.RiskNone, Calls: 1,
+	out := req.TgtLang + ":" + req.Text
+	if f.text != nil {
+		out = f.text(req.TgtLang)
+	}
+	risk := llm.RiskNone
+	if r, ok := f.risk[req.TgtLang]; ok {
+		risk = r
+	}
+	return AIOutcome{Text: out, Risk: risk, Calls: 1,
 		Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}, CostMicros: 3}, nil
 }
 

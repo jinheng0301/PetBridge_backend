@@ -86,13 +86,26 @@ func (h *ChatHandler) list(c *gin.Context) {
 	OK(c, http.StatusOK, page)
 }
 
+// failContentBlocked writes 422 CONTENT_BLOCKED; details name the fields only
+// when there are any (a refused message gives no reason, spec 5.4).
+func failContentBlocked(c *gin.Context, cb *service.ContentBlockedError) {
+	if len(cb.Fields) == 0 {
+		Fail(c, http.StatusUnprocessableEntity, model.CodeContentBlocked, "content blocked")
+		return
+	}
+	FailDetails(c, http.StatusUnprocessableEntity, model.CodeContentBlocked, "content blocked", gin.H{"fields": cb.Fields})
+}
+
 // failChat maps validation, delivery and quota errors; the rest go to failRoom.
 func failChat(c *gin.Context, err error) {
 	var ve *service.ValidationError
 	var qe *service.QuotaError
+	var cb *service.ContentBlockedError
 	switch {
 	case errors.As(err, &ve):
 		FailDetails(c, http.StatusBadRequest, model.CodeValidationFailed, "invalid fields", gin.H{"fields": ve.Fields})
+	case errors.As(err, &cb):
+		failContentBlocked(c, cb)
 	case errors.Is(err, service.ErrDeliveryNotFound):
 		Fail(c, http.StatusNotFound, model.CodeDeliveryNotFound, "delivery not found")
 	case errors.Is(err, service.ErrPolishNotReady):

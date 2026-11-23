@@ -60,6 +60,13 @@ type RateLimitedError struct{ RetryAfter time.Duration }
 
 func (e *RateLimitedError) Error() string { return "rate limited" }
 
+// ContentBlockedError reports text refused by moderation. Fields names the
+// offending request fields (onboarding); it is empty for a message, whose
+// refusal gives no reason (spec 5.4).
+type ContentBlockedError struct{ Fields []string }
+
+func (e *ContentBlockedError) Error() string { return "content blocked" }
+
 // ValidationError lists the names of the invalid request fields.
 type ValidationError struct{ Fields []string }
 

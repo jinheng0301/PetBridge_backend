@@ -365,3 +365,80 @@ func TestOnboard_ReplayReturnsSameCodeExpiry(t *testing.T) {
 		t.Fatalf("expires_at first %v, replay %v", first.InviteCode.ExpiresAt, again.InviteCode.ExpiresAt)
 	}
 }
+
+func setupModUser(t *testing.T) (*UserService, *pgxpool.Pool) {
+	t.Helper()
+	svc, pool, _ := setupUser(t)
+	return svc.WithModeration(testModerator(), repository.NewModFlagRepo(pool)), pool
+}
+
+func TestOnboard_NicknameBlocked(t *testing.T) {
+	svc, pool := setupModUser(t)
+	uid := newUser(t, pool)
+	in := valid()
+	in.Nickname = " bad dog "
+	_, err := svc.Onboard(bg, uid, in)
+	var cb *ContentBlockedError
+	if !errors.As(err, &cb) || !reflect.DeepEqual(cb.Fields, []string{"nickname"}) {
+		t.Fatalf("err=%v", err)
+	}
+	if n := count(t, pool, `select count(*) from users where id=$1 and onboarded_at is null`, uid); n != 1 {
+		t.Fatal("user onboarded")
+	}
+	fs := modFlags(t, pool)
+	if len(fs) != 1 {
+		t.Fatalf("flags %+v", fs)
+	}
+	if f := fs[0]; f.stage != model.StageNickname || f.verdict != model.ModBlock || f.userID != uid ||
+		!is(f.text, "bad dog") || f.roomID != nil || f.messageID != nil {
+		t.Fatalf("flag %+v", f)
+	}
+}
+
+func TestOnboard_NicknameReviewAllowed(t *testing.T) {
+	svc, pool := setupModUser(t)
+	uid := newUser(t, pool)
+	in := valid()
+	in.Nickname = "meh cat"
+	res, err := svc.Onboard(bg, uid, in)
+	if err != nil || res.User.Nickname == nil || *res.User.Nickname != "meh cat" {
+		t.Fatalf("res=%+v err=%v", res.User, err)
+	}
+	fs := modFlags(t, pool)
+	if len(fs) != 1 || fs[0].stage != model.StageNickname || fs[0].verdict != model.ModReview || !is(fs[0].text, "meh cat") {
+		t.Fatalf("flags %+v", fs)
+	}
+}
+
+func TestOnboard_InvalidFieldsBeforeNickname(t *testing.T) {
+	svc, pool := setupModUser(t)
+	uid := newUser(t, pool)
+	in := valid()
+	in.Nickname, in.MBTI = "bad", "XXXX"
+	_, err := svc.Onboard(bg, uid, in)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || !reflect.DeepEqual(ve.Fields, []string{"mbti"}) {
+		t.Fatalf("err=%v", err)
+	}
+	if n := len(modFlags(t, pool)); n != 0 {
+		t.Fatalf("flags = %d", n)
+	}
+}
+
+func TestOnboard_RepeatIgnoresNickname(t *testing.T) {
+	svc, pool := setupModUser(t)
+	uid := newUser(t, pool)
+	first, err := svc.Onboard(bg, uid, valid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := valid()
+	in.Nickname = "bad"
+	again, err := svc.Onboard(bg, uid, in)
+	if err != nil || again.InviteCode.Code != first.InviteCode.Code || *again.User.Nickname != "Mimi" {
+		t.Fatalf("again=%+v err=%v", again, err)
+	}
+	if n := len(modFlags(t, pool)); n != 0 {
+		t.Fatalf("flags = %d", n)
+	}
+}

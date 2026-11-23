@@ -23,6 +23,7 @@ import (
 	"github.com/jinheng0301/petbridge/internal/server"
 	"github.com/jinheng0301/petbridge/internal/service"
 	"github.com/jinheng0301/petbridge/pkg/idtoken"
+	"github.com/jinheng0301/petbridge/pkg/wordfilter"
 )
 
 // The handler tests live in an external test package because they need the
@@ -55,8 +56,17 @@ func newServices(t *testing.T) (*service.AuthService, *service.UserService, *ser
 	authSvc := service.NewAuthService(users, repository.NewAuthIdentityRepo(pool), repository.NewRefreshTokenRepo(pool),
 		tx, iss, 720*time.Hour)
 	userSvc := service.NewUserService(users, repository.NewRoomRepo(pool), repository.NewRoomMemberRepo(pool),
-		repository.NewInviteCodeRepo(pool), tx, 7, time.Now)
+		repository.NewInviteCodeRepo(pool), tx, 7, time.Now).
+		WithModeration(testModerator(), repository.NewModFlagRepo(pool))
 	return authSvc, userSvc, iss, pool
+}
+
+// testModerator blocks "bad" and flags "meh" for review.
+func testModerator() *service.WordlistModerator {
+	return service.NewWordlistModerator(wordfilter.New([]wordfilter.Entry{
+		{Term: "bad", Level: wordfilter.Block},
+		{Term: "meh", Level: wordfilter.Review},
+	}))
 }
 
 // newEngine returns an engine with the production middleware chain and one
@@ -106,8 +116,9 @@ func newAppQuota(t *testing.T, counter ratelimit.Counter, polishDaily int) *app 
 	quiet := logger.New("error", logs)
 	inline := service.NewInlinePool(1, func(context.Context, string) error { return nil }, quiet)
 	chatSvc := service.NewChatService(repository.NewTxManager(pool), users, repository.NewRoomMemberRepo(pool),
-		repository.NewMessageRepo(pool), service.PassModerator{}, nopQueue{}, inline, service.NopPublisher{},
+		repository.NewMessageRepo(pool), testModerator(), nopQueue{}, inline, service.NopPublisher{},
 		time.Now, quiet).
+		WithModFlags(repository.NewModFlagRepo(pool)).
 		WithPolish(service.NewQuotaService(ratelimit.NewPolishGuard(counter, 6, polishDaily), nopMeter{},
 			service.QuotaConfig{Enabled: true, DailyBudgetMicros: 5_000_000}, time.Now), nopQueue{})
 	r := server.NewRouter(logger.New("debug", logs), handler.NewHealthHandler(okProbe, okProbe),

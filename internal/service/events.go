@@ -17,6 +17,7 @@ const (
 	EventMessageNew        = "message.new"
 	EventMessageTranslated = "message.translated"
 	EventMessagePolished   = "message.polished"
+	EventMessageRemoved    = "message.removed"
 )
 
 // EventKind decides how an event is numbered and routed.
@@ -46,6 +47,13 @@ func roomKickedEvents(roomID, reason string, users []string) []Event {
 			Data: map[string]any{"room_id": roomID, "reason": reason}})
 	}
 	return events
+}
+
+// messageRemovedEvent tells one receiver to drop a message card that
+// moderation hid from them (spec 5.8).
+func messageRemovedEvent(roomID, messageID, to string) Event {
+	return Event{Type: EventMessageRemoved, Kind: KindTransient, RoomID: roomID, To: []string{to},
+		Data: map[string]any{"room_id": roomID, "message_id": messageID}}
 }
 
 // Event is a realtime notification for the users in To.

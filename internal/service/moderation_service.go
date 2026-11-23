@@ -5,7 +5,9 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
 
+	"github.com/jinheng0301/petbridge/internal/model"
 	"github.com/jinheng0301/petbridge/pkg/wordfilter"
 )
 
@@ -41,6 +43,34 @@ type ModResult struct {
 type Moderator interface {
 	CheckOutgoing(ctx context.Context, text, lang string) (ModResult, error)
 	CheckTranslated(ctx context.Context, text, lang, risk string) (ModResult, error)
+}
+
+// verdictStatus is the stored form of a verdict (messages/deliveries.mod_status, mod_flags.verdict).
+func verdictStatus(v ModVerdict) string {
+	switch v {
+	case ModBlock:
+		return model.ModBlock
+	case ModReview:
+		return model.ModReview
+	}
+	return model.ModOK
+}
+
+// newFlag starts a review-queue row for a non-pass result.
+func newFlag(stage string, res ModResult, userID string) model.ModFlag {
+	return model.ModFlag{Stage: stage, Verdict: verdictStatus(res.Verdict), Source: res.Source, Terms: res.Terms, UserID: userID}
+}
+
+// recordFlag writes one review-queue row (spec 5.3). The verdict itself is
+// already stored elsewhere, so a failed write is only logged, and the write
+// outlives a cancelled request. flags == nil writes nothing.
+func recordFlag(ctx context.Context, flags ModFlagStore, log *slog.Logger, f model.ModFlag) {
+	if flags == nil {
+		return
+	}
+	if err := flags.Insert(context.WithoutCancel(ctx), f); err != nil {
+		log.Warn("mod flag write failed", "stage", f.Stage, "verdict", f.Verdict, "err", err)
+	}
 }
 
 // PassModerator lets every message through.

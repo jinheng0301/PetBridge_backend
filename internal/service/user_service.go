@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -108,6 +110,15 @@ type UserService struct {
 	capacity    int // seats of each new room; DefaultRoomCapacity unless WithRoomCapacity
 	now         func() time.Time
 	newCode     func() (string, error) // tests replace it to force collisions
+	mod         Moderator              // nil: nicknames are not moderated
+	flags       ModFlagStore           // nil: no review-queue rows are written
+}
+
+// WithModeration checks nicknames at onboarding with m and records flagged
+// ones in f (spec 5.9). m == nil turns the check off.
+func (s *UserService) WithModeration(m Moderator, f ModFlagStore) *UserService {
+	s.mod, s.flags = m, f
+	return s
 }
 
 func NewUserService(users UserStore, rooms RoomStore, members RoomMemberStore, codes InviteCodeStore,
@@ -164,6 +175,9 @@ func (s *UserService) Me(ctx context.Context, userID string) (model.Profile, err
 // owner seat, signup code). A second call returns the existing result and
 // ignores its input.
 func (s *UserService) Onboard(ctx context.Context, userID string, in model.OnboardingInput) (model.OnboardingResult, error) {
+	if err := s.checkNickname(ctx, userID, in); err != nil {
+		return model.OnboardingResult{}, err
+	}
 	var res model.OnboardingResult
 	var created bool
 	err := s.tx.WithTx(ctx, func(ctx context.Context) error {
@@ -218,6 +232,48 @@ func (s *UserService) Onboard(ctx context.Context, userID string, in model.Onboa
 		}
 	}
 	return res, nil
+}
+
+// checkNickname moderates the nickname of a first onboarding (spec 5.9). It
+// runs before the transaction so the flag of a refused nickname is not rolled
+// back with it. An already onboarded user skips it: the replay ignores the
+// input anyway. A concurrent first onboarding may still be checked; that only
+// refuses a request whose input would have been ignored.
+func (s *UserService) checkNickname(ctx context.Context, userID string, in model.OnboardingInput) error {
+	if s.mod == nil {
+		return nil
+	}
+	status, onboarded, err := s.users.State(ctx, userID)
+	switch {
+	case errors.Is(err, model.ErrNotFound):
+		return ErrUserNotFound
+	case err != nil:
+		return err
+	case status != "active":
+		return ErrAccountDisabled
+	case onboarded:
+		return nil
+	}
+	if bad := ValidateOnboarding(in); len(bad) > 0 {
+		return &ValidationError{Fields: bad}
+	}
+	nick := strings.TrimSpace(in.Nickname)
+	res, err := s.mod.CheckOutgoing(ctx, nick, in.NativeLang)
+	if err != nil {
+		return fmt.Errorf("moderate nickname: %w", err)
+	}
+	if res.Verdict == ModPass {
+		return nil
+	}
+	log := slog.Default()
+	log.Info("nickname flagged by moderation", "user_id", userID, "verdict", verdictStatus(res.Verdict), "terms", len(res.Terms))
+	f := newFlag(model.StageNickname, res, userID)
+	f.Text = &nick
+	recordFlag(ctx, s.flags, log, f)
+	if res.Verdict == ModBlock {
+		return &ContentBlockedError{Fields: []string{"nickname"}}
+	}
+	return nil
 }
 
 // insertSignupCode retries on primary-key collisions.

@@ -135,3 +135,18 @@ func TestDisabledUserWithValidToken(t *testing.T) {
 		}
 	}
 }
+
+func TestOnboarding_ContentBlocked422(t *testing.T) {
+	r, _ := newRouter(t)
+	tok, _ := devLogin(t, r, "a@local")
+	body := strings.Replace(onboardBody, `"Mimi"`, `"bad mimi"`, 1)
+	w := call(r, "POST", "/api/v1/me/onboarding", body, tok)
+	if w.Code != 422 {
+		t.Fatalf("onboarding: %d %s", w.Code, w.Body.String())
+	}
+	e := asMap(t, w)["error"].(map[string]any)
+	fields, _ := e["details"].(map[string]any)["fields"].([]any)
+	if e["code"] != "CONTENT_BLOCKED" || len(fields) != 1 || fields[0] != "nickname" {
+		t.Fatalf("body %s", w.Body.String())
+	}
+}
