@@ -1,0 +1,77 @@
+# PetBridge seed moderation word list (en).
+# Format: one entry per line, "<level><TAB><term>".
+#   block  = clear, high-risk term: the message is blocked.
+#   review = ambiguous term: the message is flagged for human review.
+# Lines starting with '#' are comments. Terms are normalized (NFKC, lowercase,
+# katakana -> hiragana); ASCII-only terms match whole words, other terms match
+# as substrings with spaces/separators ignored. Zh-Hant and zh-Hans are kept separately.
+# Categories: self-harm, scam / off-platform luring, sexual, hate / abuse, minors.
+# DRAFT seed list: to be reviewed by the project owner.
+
+# self-harm
+block	kill myself
+block	suicide
+block	suicidal
+block	end my life
+block	want to die
+block	slit my wrists
+block	hang myself
+block	overdose on pills
+review	self harm
+review	cutting myself
+review	kms
+review	kys
+block	kill yourself
+
+# scams and luring
+block	wire me money
+review	send me money
+block	western union
+block	gift card code
+block	send bitcoin
+block	investment guaranteed returns
+block	crypto giveaway
+review	cashapp
+review	paypal me
+review	add me on line
+review	add me on wechat
+review	add me on kakaotalk
+review	whatsapp me
+review	telegram me
+review	send your bank account
+
+# sexual
+block	porn
+block	pornography
+block	nude pics
+block	send nudes
+block	sex video
+block	blowjob
+block	handjob
+block	hentai
+review	nudes
+review	sexting
+review	horny
+review	onlyfans
+
+# hate and severe abuse
+block	nigger
+block	nigga
+block	faggot
+block	tranny
+block	retard
+block	kike
+block	gas the jews
+review	i will kill you
+review	bitch
+review	cunt
+review	whore
+
+# minors
+block	child porn
+block	cp trading
+block	underage sex
+block	loli porn
+review	are you a virgin
+review	send me pics of you
+review	don't tell your parents

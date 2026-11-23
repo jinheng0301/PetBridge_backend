@@ -91,12 +91,17 @@ func main() {
 	}, time.Now, log)
 
 	store := repository.NewMessageRepo(pool)
+	mod, err := service.LoadModerator()
+	if err != nil {
+		log.Error("moderation word lists unavailable", "error", err.Error())
+		os.Exit(1)
+	}
 	members := repository.NewRoomMemberRepo(pool)
 	usage := repository.NewAIUsageRepo(pool)
 	q := queue.New(rdb) // shares rdb's fail-fast timeouts; rdb is closed above
-	translation := service.NewTranslationService(store, members, gw, service.PassModerator{}, pub, time.Now, log).
+	translation := service.NewTranslationService(store, members, gw, mod, pub, time.Now, log).
 		WithUsage(usage).WithPolishQueue(q)
-	polish := service.NewPolishService(store, members, gw, service.PassModerator{}, usage, pub, time.Now, log)
+	polish := service.NewPolishService(store, members, gw, mod, usage, pub, time.Now, log)
 	sweep := service.NewSweepService(store, q, time.Now, log).WithPolish(q, polish.GiveUp)
 
 	srv := asynq.NewServer(redisOpt, asynq.Config{

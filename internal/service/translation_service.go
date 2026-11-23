@@ -124,14 +124,14 @@ func (s *TranslationService) translate(ctx context.Context, w model.TranslationW
 		s.log.Warn("translation failed", "message_id", w.MessageID, "target_lang", lang, "err", err)
 		return "", model.TranslationFailed, fmt.Errorf("translate %s: %w", lang, err)
 	}
-	verdict, err := s.mod.CheckTranslated(ctx, text, lang, risk)
+	res, err := s.mod.CheckTranslated(ctx, text, lang, risk)
 	if err != nil {
 		s.log.Warn("translation moderation failed", "message_id", w.MessageID, "target_lang", lang, "err", err)
 		return "", model.TranslationFailed, fmt.Errorf("moderate %s: %w", lang, err)
 	}
-	if verdict != ModPass {
+	if res.Verdict != ModPass {
 		// B5 has no hidden state for deliveries; B6 decides what review/block do.
-		s.log.Info("translation flagged by moderation", "message_id", w.MessageID, "target_lang", lang, "verdict", int(verdict))
+		s.log.Info("translation flagged by moderation", "message_id", w.MessageID, "target_lang", lang, "verdict", int(res.Verdict))
 	}
 	return text, model.TranslationDone, nil
 }

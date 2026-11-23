@@ -1,0 +1,78 @@
+# PetBridge seed moderation word list (ko).
+# Format: one entry per line, "<level><TAB><term>".
+#   block  = clear, high-risk term: the message is blocked.
+#   review = ambiguous term: the message is flagged for human review.
+# Lines starting with '#' are comments. Terms are normalized (NFKC, lowercase,
+# katakana -> hiragana); ASCII-only terms match whole words, other terms match
+# as substrings with spaces/separators ignored. Zh-Hant and zh-Hans are kept separately.
+# Categories: self-harm, scam / off-platform luring, sexual, hate / abuse, minors.
+# DRAFT seed list: to be reviewed by the project owner.
+
+# self-harm
+block	자살
+block	죽고 싶
+block	목매
+block	손목을 긋
+block	자해
+block	극단적 선택
+review	살기 싫
+review	사라지고 싶
+review	죽어버리
+review	약을 먹고 죽
+review	번개탄
+
+# scams and luring
+review	송금해줘
+review	송금해 주세요
+review	계좌로 입금
+review	입금해 주세요
+block	상품권 코드
+block	원금 보장
+block	수익 보장
+block	코인 투자 수익
+review	카톡 추가
+review	카카오톡 추가
+review	카톡 아이디
+review	라인 추가
+review	위챗 추가
+review	텔레그램으로
+review	대출 승인
+review	계좌번호
+
+# sexual
+block	야동
+block	야한 사진
+block	누드 사진
+block	섹스하자
+block	몸캠
+block	조건만남
+block	성관계 영상
+block	자위
+review	섹스
+review	원나잇
+review	벗은 사진
+
+# hate and severe abuse
+block	씨발
+block	좆같
+block	개새끼
+block	죽여버릴
+block	뒤져라
+block	느금마
+block	니애미
+block	짱깨
+block	한남충
+review	병신
+review	미친놈
+review	꺼져
+
+# minors
+block	아동 포르노
+block	미성년자 성관계
+block	청소년 성매매
+review	부모님 몰래
+block	미성년자 야동
+block	청소년 야동
+block	초등학생 성관계
+block	중학생 성관계
+review	미성년자 만남

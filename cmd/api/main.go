@@ -156,16 +156,21 @@ func main() {
 			Prices:            bootstrap.Prices(cfg),
 		}, time.Now, log)
 	msgs := repository.NewMessageRepo(pool)
+	mod, err := service.LoadModerator()
+	if err != nil {
+		log.Error("moderation word lists unavailable", "error", err.Error())
+		os.Exit(1)
+	}
 	q := queue.New(rdb) // shares rdb's fail-fast timeouts; rdb is closed above
 	// Inline translations also record usage and hand finished rows to the polish queue.
-	translation := service.NewTranslationService(msgs, members, gw, service.PassModerator{}, pub, time.Now, log).
+	translation := service.NewTranslationService(msgs, members, gw, mod, pub, time.Now, log).
 		WithUsage(repository.NewAIUsageRepo(pool)).WithPolishQueue(q)
 	inline := service.NewInlinePool(4, translation.Process, log)
 	// Polish quota: 6 a minute and AI_POLISH_DAILY_QUOTA a local day per user, in the same
 	// Redis-with-fallback counter as the other limits; refused once today's spend reaches the budget.
 	quota := service.NewQuotaService(ratelimit.NewPolishGuard(counter, 6, cfg.AIPolishDailyQuota), meter,
 		service.QuotaConfig{Enabled: cfg.AIPolishEnabled, DailyBudgetMicros: cfg.AIDailyBudgetMicros}, time.Now)
-	chatSvc := service.NewChatService(tx, users, members, msgs, service.PassModerator{}, q, inline, pub, time.Now, log).
+	chatSvc := service.NewChatService(tx, users, members, msgs, mod, q, inline, pub, time.Now, log).
 		WithPolish(quota, q)
 	chatHandler := handler.NewChatHandler(chatSvc, authn,
 		middleware.RateLimitUser(counter, "msg", 20, time.Minute),

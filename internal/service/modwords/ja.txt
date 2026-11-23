@@ -1,0 +1,69 @@
+# PetBridge seed moderation word list (ja).
+# Format: one entry per line, "<level><TAB><term>".
+#   block  = clear, high-risk term: the message is blocked.
+#   review = ambiguous term: the message is flagged for human review.
+# Lines starting with '#' are comments. Terms are normalized (NFKC, lowercase,
+# katakana -> hiragana); ASCII-only terms match whole words, other terms match
+# as substrings with spaces/separators ignored. Zh-Hant and zh-Hans are kept separately.
+# Categories: self-harm, scam / off-platform luring, sexual, hate / abuse, minors.
+# DRAFT seed list: to be reviewed by the project owner.
+
+# self-harm
+block	死にたい
+block	自殺
+block	首吊り
+block	リストカット
+review	消えてしまいたい
+review	自傷
+review	死んでしまいたい
+review	生きていたくない
+review	オーバードーズ
+
+# scams and luring
+review	振り込んで
+review	送金してください
+review	お金を振り込
+block	ギフトカードを買って
+block	簡単に稼げる
+block	必ず儲かる
+block	投資詐欺
+review	ラインを交換
+review	LINE交換
+review	ライン教えて
+review	カカオ交換
+review	ウィーチャット
+review	口座番号
+review	暗号資産
+
+# sexual
+block	エロ画像
+block	エロ動画
+block	ヌード写真
+block	セックスしよう
+block	裸の写真
+block	フェラ
+block	オナニー
+review	エッチしよう
+review	えっち
+review	ヌード
+review	援交
+review	パパ活
+
+# hate and severe abuse
+block	ぶっ殺す
+block	殺してやる
+block	死ね
+block	きもいから消えろ
+block	シナ人
+review	ばか野郎
+review	うざい消えろ
+
+# minors
+block	児童ポルノ
+block	jcの裸
+block	jkの裸
+block	未成年とやりたい
+review	援助交際
+review	親に内緒
+review	クズ野郎
+review	ロリコン

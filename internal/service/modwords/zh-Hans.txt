@@ -1,0 +1,76 @@
+# PetBridge seed moderation word list (zh-Hans).
+# Format: one entry per line, "<level><TAB><term>".
+#   block  = clear, high-risk term: the message is blocked.
+#   review = ambiguous term: the message is flagged for human review.
+# Lines starting with '#' are comments. Terms are normalized (NFKC, lowercase,
+# katakana -> hiragana); ASCII-only terms match whole words, other terms match
+# as substrings with spaces/separators ignored. Zh-Hant and zh-Hans are kept separately.
+# Categories: self-harm, scam / off-platform luring, sexual, hate / abuse, minors.
+# DRAFT seed list: to be reviewed by the project owner.
+
+# self-harm
+block	自杀
+block	想自杀
+block	不想活了
+block	割腕
+block	上吊
+block	烧炭
+review	结束生命
+review	自残
+review	活着没意思
+review	轻生
+review	安眠药
+
+# scams and luring
+review	转账给我
+review	汇款到
+block	扫码转账
+block	刷单返利
+block	稳赚不赔
+block	保证收益
+block	杀猪盘
+block	充值返现
+block	购买礼品卡
+review	加微信
+review	加我微信
+review	加qq
+review	加line
+review	加kakaotalk
+review	银行卡号
+review	虚拟货币投资
+
+# sexual
+block	色情视频
+block	裸照
+block	约炮
+block	一夜情
+block	性爱视频
+block	援交
+block	黄色网站
+review	色情
+review	求裸聊
+review	包养
+review	做爱
+
+# hate and severe abuse
+block	傻逼
+block	操你妈
+block	草泥马
+block	去死吧
+block	杀了你
+block	死全家
+block	黑鬼
+block	贱货
+review	滚蛋
+review	婊子
+
+# minors
+block	儿童色情
+block	幼女
+block	未成年色情
+block	萝莉资源
+review	别告诉你父母
+review	未成年人约
+block	支那人
+block	支那猪
+block	想跳楼

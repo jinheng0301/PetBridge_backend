@@ -141,13 +141,13 @@ func (s *ChatService) Send(ctx context.Context, userID, roomID string, in SendIn
 		return model.MessageView{}, fmt.Errorf("find replay: %w", err)
 	}
 
-	verdict, err := s.mod.CheckOutgoing(ctx, body, srcLang)
+	res, err := s.mod.CheckOutgoing(ctx, body, srcLang)
 	if err != nil {
 		return model.MessageView{}, fmt.Errorf("moderate outgoing: %w", err)
 	}
-	if verdict != ModPass {
+	if res.Verdict != ModPass {
 		// B5 has no blocked state for messages; B6 decides what review/block do.
-		s.log.Info("outgoing message flagged by moderation", "room_id", roomID, "user_id", userID, "verdict", int(verdict))
+		s.log.Info("outgoing message flagged by moderation", "room_id", roomID, "user_id", userID, "verdict", int(res.Verdict))
 	}
 
 	id, err := uuid.NewV7()

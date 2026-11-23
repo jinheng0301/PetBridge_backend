@@ -1,5 +1,10 @@
 // Package wordfilter matches a multilingual word list against text using
 // Aho-Corasick. It is business-agnostic.
+//
+// A term made only of ASCII letters/digits and single spaces (so a word or an
+// English phrase) matches strictly: whitespace runs in the text are collapsed
+// to one space and the whole term must sit on word boundaries. Every other
+// term matches loosely: as a substring after separators are stripped.
 package wordfilter
 
 import (
@@ -84,13 +89,16 @@ func stripSeparators(s string) string {
 	return b.String()
 }
 
-func allASCIIAlnum(s string) bool {
+// strictTerm reports whether s (already normalized) consists only of ASCII
+// letters/digits and single spaces, and returns it with whitespace collapsed.
+func strictTerm(s string) (string, bool) {
+	s = strings.Join(strings.Fields(s), " ")
 	for _, r := range s {
-		if !isASCIIAlnum(r) {
-			return false
+		if !isASCIIAlnum(r) && r != ' ' {
+			return "", false
 		}
 	}
-	return s != ""
+	return s, s != ""
 }
 
 // New builds a Filter. Duplicate terms keep the highest level; terms that
@@ -101,7 +109,8 @@ func New(entries []Entry) *Filter {
 	for _, e := range entries {
 		t := Normalize(e.Term)
 		m := looseTerms
-		if allASCIIAlnum(t) {
+		if st, ok := strictTerm(t); ok {
+			t = st
 			m = asciiTerms
 		} else {
 			t = stripSeparators(t)
@@ -128,15 +137,30 @@ func (f *Filter) Match(text string) (Level, []string) {
 	norm := []rune(Normalize(text))
 	var hits []hit
 
-	f.ascii.scan(norm, func(start, end int, term string, lv Level) {
-		if start > 0 && isASCIIAlnum(norm[start-1]) {
-			return
+	if f.ascii.size > 0 {
+		// Collapse whitespace runs to one space, remembering original positions.
+		col := make([]rune, 0, len(norm))
+		colOrigin := make([]int, 0, len(norm))
+		for i, r := range norm {
+			if unicode.IsSpace(r) {
+				if len(col) > 0 && col[len(col)-1] == ' ' {
+					continue
+				}
+				r = ' '
+			}
+			col = append(col, r)
+			colOrigin = append(colOrigin, i)
 		}
-		if end < len(norm) && isASCIIAlnum(norm[end]) {
-			return
-		}
-		hits = append(hits, hit{term, lv, start})
-	})
+		f.ascii.scan(col, func(start, end int, term string, lv Level) {
+			if start > 0 && isASCIIAlnum(col[start-1]) {
+				return
+			}
+			if end < len(col) && isASCIIAlnum(col[end]) {
+				return
+			}
+			hits = append(hits, hit{term, lv, colOrigin[start]})
+		})
+	}
 
 	if f.loose.size > 0 {
 		stripped := make([]rune, 0, len(norm))

@@ -174,3 +174,17 @@ func TestMatch_ASCIITermAdjacentToCJK(t *testing.T) {
 		t.Errorf("CJK neighbours must not block an ASCII term")
 	}
 }
+
+func TestMatch_ASCIIPhraseWholePhrase(t *testing.T) {
+	f := New([]Entry{{"end my life", Block}, {"want to die", Block}})
+	for _, s := range []string{"i want to end my life", "END   MY LIFE", "end\nmy life"} {
+		if lv, _ := f.Match(s); lv != Block {
+			t.Errorf("%q: want Block, got %v", s, lv)
+		}
+	}
+	for _, s := range []string{"I spend my life here", "I want to diet", "bend my lifelong"} {
+		if lv, terms := f.Match(s); lv != None {
+			t.Errorf("%q: want None, got %v %v", s, lv, terms)
+		}
+	}
+}

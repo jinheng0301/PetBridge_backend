@@ -94,14 +94,14 @@ func (s *PolishService) polish(ctx context.Context, w model.PolishWork, base str
 		s.log.Info("polish fell back", "delivery_id", w.DeliveryID, "class", class)
 		return "", model.PolishFallback
 	}
-	verdict, err := s.mod.CheckTranslated(ctx, out.Text, w.TargetLang, out.Risk)
+	res, err := s.mod.CheckTranslated(ctx, out.Text, w.TargetLang, out.Risk)
 	if err != nil {
 		s.log.Warn("polish moderation failed", "delivery_id", w.DeliveryID, "err", err)
 		return "", model.PolishFallback
 	}
-	if verdict != ModPass {
+	if res.Verdict != ModPass {
 		// B5 has no hidden state for deliveries; B6 decides what review/block do.
-		s.log.Info("polish flagged by moderation", "delivery_id", w.DeliveryID, "verdict", int(verdict))
+		s.log.Info("polish flagged by moderation", "delivery_id", w.DeliveryID, "verdict", int(res.Verdict))
 	}
 	return out.Text, model.PolishDone
 }
