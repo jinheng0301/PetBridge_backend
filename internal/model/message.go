@@ -88,6 +88,7 @@ type NewMessage struct {
 	PhraseID                    *string
 	SrcLang, Body, ClientMsgID  string
 	PolishRequested             bool
+	ModStatus                   string // "" is written as ModOK
 }
 
 // NewDelivery is the input for inserting one receiver's delivery row.
@@ -106,6 +107,7 @@ type PolishWork struct {
 	TranslationStatus, PolishStatus                                                      string
 	PolishBy                                                                             *string
 	ReceiverMBTI                                                                         string // "" when unset
+	ModStatus                                                                            string // the delivery's moderation verdict
 }
 
 // PolishGiveUp is a pending polish set to fallback because its translation gave up.

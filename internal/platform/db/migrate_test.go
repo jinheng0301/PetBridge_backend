@@ -75,6 +75,23 @@ func TestMigrateUp_CreatesAIUsageDaily(t *testing.T) {
 	wantState(t, err, "23514") // kind check
 }
 
+func TestMigrateUp_CreatesModerationTables(t *testing.T) {
+	p := dbtest.Reset(t)
+	for _, tbl := range []string{"mod_flags", "blocks", "reports"} {
+		var n int
+		if err := p.QueryRow(bg, `select count(*) from information_schema.tables where table_schema='public' and table_name=$1`, tbl).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("table %s missing (n=%d err=%v)", tbl, n, err)
+		}
+	}
+	var n int
+	if err := p.QueryRow(bg, `select count(*) from information_schema.columns where table_name='deliveries' and column_name='mod_status'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("deliveries.mod_status missing (n=%d err=%v)", n, err)
+	}
+	u := newUser(t, p)
+	_, err := p.Exec(bg, `insert into blocks(blocker_id, blocked_id) values($1,$1)`, u)
+	wantState(t, err, "23514") // self-block check
+}
+
 func TestMigrateDownThenUp_RoundTrip(t *testing.T) {
 	p := dbtest.Reset(t)
 	for i := 0; i < 10; i++ { // roll back every migration, not just the latest
@@ -213,8 +230,8 @@ func TestMigration0003_AddsRewardForColumn(t *testing.T) {
 	if err != nil || refs != 1 {
 		t.Fatalf("self-referencing fk count=%d err=%v", refs, err)
 	}
-	// 0005 is the latest migration now: roll back 0005 and 0004 first, then 0003.
-	for i := 0; i < 3; i++ {
+	// 0006 is the latest migration now: roll back 0006, 0005 and 0004 first, then 0003.
+	for i := 0; i < 4; i++ {
 		if err := db.MigrateDown(bg, dbtest.URL()); err != nil {
 			t.Fatal(err)
 		}

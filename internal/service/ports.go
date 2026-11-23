@@ -135,7 +135,12 @@ type MessageStore interface {
 	// TranslationWork reads the message and all its non-done deliveries; Pending is empty when nothing is left.
 	TranslationWork(ctx context.Context, messageID string) (model.TranslationWork, error)
 	// SetTranslation only touches non-done rows: writes base_text and status, translate_attempts+1, updated_at=now; changed=false means already done.
-	SetTranslation(ctx context.Context, deliveryID string, baseText *string, status string, now time.Time) (changed bool, err error)
+	// modStatus is the delivery's moderation verdict (model.ModOK / ModReview / ModBlock).
+	SetTranslation(ctx context.Context, deliveryID string, baseText *string, status, modStatus string, now time.Time) (changed bool, err error)
+	// WithdrawMessage hides the message from all receivers in one statement: messages.mod_status and every delivery's
+	// mod_status become 'block', unfinished translation_status becomes 'done', pending polishes become 'fallback'.
+	// It returns every receiver id.
+	WithdrawMessage(ctx context.Context, messageID string, now time.Time) ([]string, error)
 	// StuckTranslations returns ids (distinct) of messages whose translation must be re-run (spec 5.5 sweep, first two rules).
 	StuckTranslations(ctx context.Context, now time.Time, pendingAfter, failedEvery, giveUpAfter time.Duration, limit int) ([]string, error)
 
@@ -149,6 +154,33 @@ type MessageStore interface {
 	StuckPolishes(ctx context.Context, now time.Time, pendingAfter time.Duration, limit int) ([]string, error)
 	// GiveUpPolishes sets pending polishes to fallback when the translation failed and the message is older than giveUpAfter; returns the rows changed.
 	GiveUpPolishes(ctx context.Context, now time.Time, giveUpAfter time.Duration, limit int) ([]model.PolishGiveUp, error)
+}
+
+// ModFlagStore writes the moderation review queue (mod_flags).
+type ModFlagStore interface {
+	Insert(ctx context.Context, f model.ModFlag) error
+}
+
+// BlockStore keeps user blocks.
+type BlockStore interface {
+	Block(ctx context.Context, blockerID, blockedID string) error // does nothing when it already exists
+	Unblock(ctx context.Context, blockerID, blockedID string) error
+	IsBlocking(ctx context.Context, blockerID, blockedID string) (bool, error)
+	Count(ctx context.Context, blockerID string) (int, error)
+	List(ctx context.Context, blockerID string) ([]model.BlockedUser, error)                   // newest first
+	Between(ctx context.Context, a, b string) (bool, error)                                    // either direction
+	BlockedAmong(ctx context.Context, userID string, others []string) (map[string]bool, error) // either direction
+}
+
+// ReportStore keeps user reports.
+type ReportStore interface {
+	// Insert returns the id and time of the already open identical report when there is one.
+	Insert(ctx context.Context, r model.NewReport) (id string, createdAt time.Time, err error)
+	// FindOpen returns the open report for the same (reporter, target, message_id), or model.ErrNotFound.
+	FindOpen(ctx context.Context, reporterID, targetID string, messageID *string) (id string, createdAt time.Time, err error)
+	CountSince(ctx context.Context, reporterID string, since time.Time) (int, error)
+	// MessageReportable: the message is in roomID, sent by senderID, and reporterID has a delivery of it.
+	MessageReportable(ctx context.Context, messageID, roomID, senderID, reporterID string) (bool, error)
 }
 
 // UsageStore records real AI calls per user and day (ai_usage_daily).

@@ -225,14 +225,14 @@ func TestMessageRepo_SetTranslationNeverRegresses(t *testing.T) {
 		t.Fatalf("work %+v err=%v", w, err)
 	}
 	fail := model.TranslationFailed
-	if ch, err := repo.SetTranslation(bg, did, nil, fail, now); err != nil || !ch {
+	if ch, err := repo.SetTranslation(bg, did, nil, fail, model.ModOK, now); err != nil || !ch {
 		t.Fatalf("failed write ch=%v err=%v", ch, err)
 	}
 	txt := "안녕"
-	if ch, err := repo.SetTranslation(bg, did, &txt, model.TranslationDone, now); err != nil || !ch {
+	if ch, err := repo.SetTranslation(bg, did, &txt, model.TranslationDone, model.ModOK, now); err != nil || !ch {
 		t.Fatalf("done write ch=%v err=%v", ch, err)
 	}
-	if ch, err := repo.SetTranslation(bg, did, nil, fail, now); err != nil || ch {
+	if ch, err := repo.SetTranslation(bg, did, nil, fail, model.ModOK, now); err != nil || ch {
 		t.Fatalf("regress ch=%v err=%v", ch, err)
 	}
 	var st string
@@ -249,7 +249,7 @@ func TestMessageRepo_SetTranslationNeverRegresses(t *testing.T) {
 	if _, err := repo.TranslationWork(bg, newUUID(t, p)); err != model.ErrNotFound {
 		t.Fatalf("err=%v", err)
 	}
-	if ch, err := repo.SetTranslation(bg, "bad", nil, fail, now); err != nil || ch {
+	if ch, err := repo.SetTranslation(bg, "bad", nil, fail, model.ModOK, now); err != nil || ch {
 		t.Fatalf("bad id ch=%v err=%v", ch, err)
 	}
 }

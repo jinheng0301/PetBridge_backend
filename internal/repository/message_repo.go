@@ -55,11 +55,15 @@ func (r *MessageRepo) ActiveRecipients(ctx context.Context, roomID string) ([]mo
 
 // InsertMessage writes the row unless (sender_id, client_msg_id) already exists.
 func (r *MessageRepo) InsertMessage(ctx context.Context, m model.NewMessage) (bool, error) {
+	modStatus := m.ModStatus
+	if modStatus == "" {
+		modStatus = model.ModOK
+	}
 	tag, err := conn(ctx, r.pool).Exec(ctx, `
-		insert into messages(id, room_id, sender_id, scope, to_user_id, kind, phrase_id, src_lang, body, client_msg_id, polish_requested)
-		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		insert into messages(id, room_id, sender_id, scope, to_user_id, kind, phrase_id, src_lang, body, client_msg_id, polish_requested, mod_status)
+		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		on conflict (sender_id, client_msg_id) do nothing`,
-		m.ID, m.RoomID, m.SenderID, m.Scope, m.ToUserID, m.Kind, m.PhraseID, m.SrcLang, m.Body, m.ClientMsgID, m.PolishRequested)
+		m.ID, m.RoomID, m.SenderID, m.Scope, m.ToUserID, m.Kind, m.PhraseID, m.SrcLang, m.Body, m.ClientMsgID, m.PolishRequested, modStatus)
 	if err != nil {
 		return false, err
 	}
@@ -111,7 +115,7 @@ func (r *MessageRepo) ViewsOf(ctx context.Context, messageID string) (model.Mess
 
 	rows, err := db.Query(ctx, `
 		select receiver_id::text, id::text, target_lang, base_text, translation_status, polished_text, polish_status
-		from deliveries where message_id = $1`, messageID)
+		from deliveries where message_id = $1 and mod_status <> 'block'`, messageID)
 	if err != nil {
 		return model.MessageViews{}, err
 	}
@@ -156,7 +160,7 @@ func (r *MessageRepo) ListForViewer(ctx context.Context, roomID, viewerID string
 		select `+messageCols+`, d.id::text, d.target_lang, d.base_text, d.translation_status, d.polished_text, d.polish_status
 		from messages m
 		join users u on u.id = m.sender_id
-		left join deliveries d on d.message_id = m.id and d.receiver_id = $2
+		left join deliveries d on d.message_id = m.id and d.receiver_id = $2 and d.mod_status <> 'block'
 		where m.room_id = $1 and (m.sender_id = $2 or d.id is not null)`+cond+`
 		order by m.id `+order+` limit $3`, args...)
 	if err != nil {
@@ -229,14 +233,14 @@ func (r *MessageRepo) TranslationWork(ctx context.Context, messageID string) (mo
 }
 
 // SetTranslation records a translation result unless the delivery is already done.
-func (r *MessageRepo) SetTranslation(ctx context.Context, deliveryID string, baseText *string, status string, now time.Time) (bool, error) {
+func (r *MessageRepo) SetTranslation(ctx context.Context, deliveryID string, baseText *string, status, modStatus string, now time.Time) (bool, error) {
 	if !uuidRE.MatchString(deliveryID) {
 		return false, nil
 	}
 	tag, err := conn(ctx, r.pool).Exec(ctx, `
 		update deliveries
-		set base_text = $2, translation_status = $3, translate_attempts = translate_attempts + 1, updated_at = $4
-		where id = $1 and translation_status <> 'done'`, deliveryID, baseText, status, now)
+		set base_text = $2, translation_status = $3, mod_status = $4, translate_attempts = translate_attempts + 1, updated_at = $5
+		where id = $1 and translation_status <> 'done'`, deliveryID, baseText, status, modStatus, now)
 	if err != nil {
 		return false, err
 	}
@@ -278,15 +282,49 @@ func (r *MessageRepo) PolishWork(ctx context.Context, deliveryID string) (model.
 	var w model.PolishWork
 	err := conn(ctx, r.pool).QueryRow(ctx, `
 		select d.id::text, m.id::text, m.room_id::text, m.sender_id::text, d.receiver_id::text, m.kind, m.src_lang, m.body,
-		       d.target_lang, d.base_text, d.translation_status, d.polish_status, d.polish_by::text, coalesce(u.mbti, '')
+		       d.target_lang, d.base_text, d.translation_status, d.polish_status, d.polish_by::text, coalesce(u.mbti, ''), d.mod_status
 		from deliveries d join messages m on m.id = d.message_id join users u on u.id = d.receiver_id
 		where d.id = $1`, deliveryID).
 		Scan(&w.DeliveryID, &w.MessageID, &w.RoomID, &w.SenderID, &w.ReceiverID, &w.Kind, &w.SrcLang, &w.Body,
-			&w.TargetLang, &w.BaseText, &w.TranslationStatus, &w.PolishStatus, &w.PolishBy, &w.ReceiverMBTI)
+			&w.TargetLang, &w.BaseText, &w.TranslationStatus, &w.PolishStatus, &w.PolishBy, &w.ReceiverMBTI, &w.ModStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.PolishWork{}, model.ErrNotFound
 	}
 	return w, err
+}
+
+// WithdrawMessage hides a message from every receiver in one statement: the message and all its
+// deliveries get mod_status 'block', unfinished translations are marked done (so the sweep skips them)
+// and pending polishes fall back. It returns every receiver id.
+func (r *MessageRepo) WithdrawMessage(ctx context.Context, messageID string, now time.Time) ([]string, error) {
+	if !uuidRE.MatchString(messageID) {
+		return nil, nil
+	}
+	rows, err := conn(ctx, r.pool).Query(ctx, `
+		with m as (
+			update messages set mod_status = 'block' where id = $1 returning id
+		)
+		update deliveries d
+		set mod_status = 'block',
+		    translation_status = 'done',
+		    polish_status = case when d.polish_status = 'pending' then 'fallback' else d.polish_status end,
+		    updated_at = $2
+		from m
+		where d.message_id = m.id
+		returning d.receiver_id::text`, messageID, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // SetPolish records a polish result while the row is still pending.

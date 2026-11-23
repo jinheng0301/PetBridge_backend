@@ -169,7 +169,7 @@ type failingSetStore struct {
 	failAt int
 }
 
-func (f *failingSetStore) SetTranslation(ctx context.Context, id string, base *string, status string, at time.Time) (bool, error) {
+func (f *failingSetStore) SetTranslation(ctx context.Context, id string, base *string, status, modStatus string, at time.Time) (bool, error) {
 	f.mu.Lock()
 	f.calls++
 	n := f.calls
@@ -177,7 +177,7 @@ func (f *failingSetStore) SetTranslation(ctx context.Context, id string, base *s
 	if n >= f.failAt {
 		return false, errors.New("db down")
 	}
-	return f.MessageStore.SetTranslation(ctx, id, base, status, at)
+	return f.MessageStore.SetTranslation(ctx, id, base, status, modStatus, at)
 }
 
 // A DB error mid-loop still announces the rows this run already set done.

@@ -85,7 +85,7 @@ func (s *TranslationService) Process(ctx context.Context, messageID string) erro
 			base = &text
 		}
 		for _, d := range groups[lang] {
-			ok, err := s.store.SetTranslation(ctx, d.ID, base, status, s.now())
+			ok, err := s.store.SetTranslation(ctx, d.ID, base, status, model.ModOK, s.now())
 			if err != nil {
 				// Rows already set done in this run are not pending any more, so a
 				// retry would never announce them: publish them before failing.
