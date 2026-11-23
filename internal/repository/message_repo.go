@@ -36,7 +36,7 @@ func (r *MessageRepo) ActiveRecipients(ctx context.Context, roomID string) ([]mo
 	rows, err := conn(ctx, r.pool).Query(ctx, `
 		select u.id::text, coalesce(u.native_lang,''), coalesce(u.age_band,'')
 		from room_members rm join users u on u.id = rm.user_id
-		where rm.room_id = $1 and rm.left_at is null
+		where rm.room_id = $1 and rm.left_at is null and u.status = 'active'
 		order by rm.seat_no`, roomID)
 	if err != nil {
 		return nil, err

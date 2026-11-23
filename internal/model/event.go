@@ -39,6 +39,9 @@ const (
 	// CloseTokenExpired: the access token used for the upgrade expired;
 	// refresh it and reconnect at once.
 	CloseTokenExpired = 4401
+	// CloseAccountDisabled: the account was banned or deleted; the client must
+	// not reconnect and goes back to the login page.
+	CloseAccountDisabled = 4403
 )
 
 // Frame is a server-to-client WebSocket frame. Seq is set only on room state

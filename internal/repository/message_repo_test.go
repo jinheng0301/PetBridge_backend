@@ -315,3 +315,18 @@ func TestMessageRepo_ListForViewer_LimitDefaultAndMax(t *testing.T) {
 		t.Fatalf("max: n=%d more=%v err=%v", len(items), more, err)
 	}
 }
+
+func TestActiveRecipients_SkipsBanned(t *testing.T) {
+	p := dbtest.Reset(t)
+	repo := repository.NewMessageRepo(p)
+	owner, u2 := mkUser(t, p), mkUser(t, p)
+	room := mkRoom(t, p, owner)
+	seat(t, p, room, u2, 2)
+	if _, err := p.Exec(bg, `update users set status='banned' where id=$1`, u2); err != nil {
+		t.Fatal(err)
+	}
+	rs, err := repo.ActiveRecipients(bg, room)
+	if err != nil || len(rs) != 1 || rs[0].UserID != owner {
+		t.Fatalf("rs=%+v err=%v", rs, err)
+	}
+}

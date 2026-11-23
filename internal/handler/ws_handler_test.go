@@ -682,3 +682,22 @@ func TestWS_ShutdownRefusesNewUpgrades(t *testing.T) {
 		t.Fatalf("upgrade during shutdown: err=%v resp=%v", err, resp)
 	}
 }
+
+func TestWs_BannedConnectionClosedOnPing(t *testing.T) {
+	cfg := service.DefaultRealtimeConfig("0.0.0")
+	cfg.Heartbeat = 50 * time.Millisecond
+	a := newWSApp(t, wsOpts{cfg: &cfg})
+	o := a.onboarded(t, "o@x.test", "18_plus")
+	cl := a.dial(t, o.token)
+	if _, err := a.pool.Exec(bg, `update users set status='banned' where id=$1`, o.id); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-cl.done:
+	case <-time.After(time.Second):
+		t.Fatal("banned connection not closed within 1s")
+	}
+	if s := websocket.CloseStatus(cl.err); s != model.CloseAccountDisabled {
+		t.Fatalf("close status %d, want %d", s, model.CloseAccountDisabled)
+	}
+}
