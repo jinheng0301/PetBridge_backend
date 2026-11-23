@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,7 +18,7 @@ import (
 	"github.com/jinheng0301/petbridge/pkg/llm"
 )
 
-// AICache stores translations. Errors (Redis down) are returned; the gateway
+// AICache stores translations and polishes as JSON {"t": text, "r": risk}. Errors (Redis down) are returned; the gateway
 // treats a failed Get as a miss and ignores a failed Set.
 type AICache interface {
 	Get(ctx context.Context, key string) (val string, ok bool, err error)
@@ -43,7 +44,7 @@ type GatewayConfig struct {
 
 // AIOutcome is one gateway call's result. It is valid even when err != nil:
 // Calls, Usage and CostMicros record calls already paid for (a polish that
-// broke a rule). Risk is "none" on a cache hit.
+// broke a rule). On a cache hit Risk is the stored risk.
 type AIOutcome struct {
 	Text, Risk, Provider, Model string
 	Cached                      bool
@@ -148,6 +149,29 @@ func PolishCacheKey(req llm.PolishRequest) string {
 	return "po:" + hex.EncodeToString(sum[:]) + ":" + req.SrcLang + ":" + req.TgtLang + ":" + req.MBTI + ":" + req.Tier + ":" + llm.PolishPromptVersion
 }
 
+type cacheEntry struct {
+	T string `json:"t"`
+	R string `json:"r"`
+}
+
+func encodeCacheEntry(res llm.Result) string {
+	b, _ := json.Marshal(cacheEntry{T: res.Text, R: res.Risk})
+	return string(b)
+}
+
+// decodeCacheEntry treats a legacy plain-text value, bad JSON or an empty
+// text as a miss.
+func decodeCacheEntry(v string) (cacheEntry, bool) {
+	var e cacheEntry
+	if err := json.Unmarshal([]byte(v), &e); err != nil || e.T == "" {
+		return cacheEntry{}, false
+	}
+	if e.R == "" {
+		e.R = llm.RiskNone
+	}
+	return e, true
+}
+
 func normalizeForCache(s string) string {
 	// strings.Fields splits on unicode.IsSpace, which drops leading and
 	// trailing whitespace too.
@@ -175,7 +199,9 @@ type providerCall func(ctx context.Context, p llm.Provider) (llm.Result, error)
 func (g *AIGateway) run(ctx context.Context, key string, ttl time.Duration, limit int64, timeout time.Duration,
 	do providerCall, check func(llm.Result) string) (AIOutcome, error) {
 	if v, ok, err := g.cache.Get(ctx, key); err == nil && ok {
-		return AIOutcome{Text: v, Risk: llm.RiskNone, Cached: true}, nil
+		if e, ok := decodeCacheEntry(v); ok {
+			return AIOutcome{Text: e.T, Risk: e.R, Cached: true}, nil
+		}
 	}
 	day := g.now().UTC().Format("20060102")
 	total, err := g.meter.Total(ctx, day)
@@ -209,8 +235,10 @@ func (g *AIGateway) run(ctx context.Context, key string, ttl time.Duration, limi
 					return out, &PolishRejectedError{Check: c}
 				}
 			}
-			if err := g.cache.Set(context.WithoutCancel(ctx), key, res.Text, ttl); err != nil {
-				g.log.Warn("ai cache set failed", "err", err)
+			if res.Risk != llm.RiskBlock {
+				if err := g.cache.Set(context.WithoutCancel(ctx), key, encodeCacheEntry(res), ttl); err != nil {
+					g.log.Warn("ai cache set failed", "err", err)
+				}
 			}
 			return out, nil
 		}

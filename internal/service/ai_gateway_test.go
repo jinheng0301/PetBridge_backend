@@ -27,6 +27,8 @@ type gwProvider struct {
 	sleep time.Duration // honours ctx while sleeping
 
 	polishText string // Polish answer; "" = req.Text + "呀"
+	trRisk     string // Translate risk; "" = review
+	poRisk     string // Polish risk; "" = none
 	polishErr  error
 
 	calls    atomic.Int64
@@ -57,7 +59,11 @@ func (p *gwProvider) Translate(ctx context.Context, req llm.TranslateRequest) (l
 	if p.err != nil {
 		return llm.Result{}, p.err
 	}
-	return llm.Result{Text: p.name + ":" + req.Text, Risk: llm.RiskReview, Model: p.model, Usage: p.usage}, nil
+	risk := p.trRisk
+	if risk == "" {
+		risk = llm.RiskReview
+	}
+	return llm.Result{Text: p.name + ":" + req.Text, Risk: risk, Model: p.model, Usage: p.usage}, nil
 }
 
 // Polish returns polishText (default: req.Text + "呀") unless polishErr is set.
@@ -77,7 +83,11 @@ func (p *gwProvider) Polish(ctx context.Context, req llm.PolishRequest) (llm.Res
 	if text == "" {
 		text = req.Text + "呀"
 	}
-	return llm.Result{Text: text, Risk: llm.RiskNone, Model: p.model, Usage: p.usage}, nil
+	risk := p.poRisk
+	if risk == "" {
+		risk = llm.RiskNone
+	}
+	return llm.Result{Text: text, Risk: risk, Model: p.model, Usage: p.usage}, nil
 }
 
 // tr3 adapts the gateway's outcome to the (text, risk, err) shape the B5a tests use.
@@ -216,8 +226,8 @@ func TestGateway_CacheHit(t *testing.T) {
 	if meter.adds != adds {
 		t.Fatalf("cache hit added cost")
 	}
-	if text2 != text1 || risk != llm.RiskNone {
-		t.Fatalf("hit = %q / %q, want %q / none", text2, risk, text1)
+	if text2 != text1 || risk != llm.RiskReview {
+		t.Fatalf("hit = %q / %q, want %q / review", text2, risk, text1)
 	}
 }
 
@@ -493,5 +503,48 @@ func TestGateway_SemaphoreWaitHonoursCtx(t *testing.T) {
 	defer cancel()
 	if _, _, err := tr3(g, ctx, gwReq("waiter")); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want ctx error", err)
+	}
+}
+
+func TestGateway_CacheKeepsRisk(t *testing.T) {
+	cache := newGWCache()
+	p := &gwProvider{name: "fake-primary", trRisk: llm.RiskReview}
+	g := newTestGateway(gwConfig(), cache, newGWMeter(), nil, p)
+	if _, err := g.Translate(context.Background(), gwReq("hello")); err != nil {
+		t.Fatal(err)
+	}
+	o, err := g.Translate(context.Background(), gwReq("hello"))
+	if err != nil || !o.Cached || o.Risk != llm.RiskReview || p.calls.Load() != 1 {
+		t.Fatalf("outcome %+v err=%v calls=%d", o, err, p.calls.Load())
+	}
+}
+
+func TestGateway_LegacyCacheValueIsMiss(t *testing.T) {
+	cache := newGWCache()
+	p := &gwProvider{name: "fake-primary"}
+	g := newTestGateway(gwConfig(), cache, newGWMeter(), nil, p)
+	key := TranslateCacheKey(gwReq("hello"))
+	cache.data[key] = "legacy plain text"
+	o, err := g.Translate(context.Background(), gwReq("hello"))
+	if err != nil || o.Cached || p.calls.Load() != 1 {
+		t.Fatalf("outcome %+v err=%v calls=%d", o, err, p.calls.Load())
+	}
+	if v := cache.data[key]; !strings.HasPrefix(v, "{") || !strings.Contains(v, `"t":"fake-primary:hello"`) {
+		t.Fatalf("legacy value not overwritten: %q", v)
+	}
+}
+
+func TestGateway_BlockNotCached(t *testing.T) {
+	cache := newGWCache()
+	p := &gwProvider{name: "fake-primary", trRisk: llm.RiskBlock}
+	g := newTestGateway(gwConfig(), cache, newGWMeter(), nil, p)
+	for i := 0; i < 2; i++ {
+		o, err := g.Translate(context.Background(), gwReq("hello"))
+		if err != nil || o.Cached || o.Risk != llm.RiskBlock {
+			t.Fatalf("call %d: %+v err=%v", i, o, err)
+		}
+	}
+	if p.calls.Load() != 2 || cache.sets != 0 {
+		t.Fatalf("calls=%d sets=%d, want 2 / 0", p.calls.Load(), cache.sets)
 	}
 }

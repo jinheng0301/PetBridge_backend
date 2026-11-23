@@ -100,8 +100,8 @@ func TestGateway_CacheBeforeBudget(t *testing.T) {
 	p := &gwProvider{name: "fake-primary"}
 	g := newTestGateway(polishCfg(), cache, meter, nil, p)
 	tr, po := gwReq("hi"), gwPolishReq("明天见。")
-	cache.data[TranslateCacheKey(tr)] = "cached-tr"
-	cache.data[PolishCacheKey(po)] = "cached-po"
+	cache.data[TranslateCacheKey(tr)] = `{"t":"cached-tr","r":"none"}`
+	cache.data[PolishCacheKey(po)] = `{"t":"cached-po","r":"none"}`
 	meter.data[gwDay] = 3 * polishCfg().DailyBudgetMicros
 
 	if o, err := g.Translate(context.Background(), tr); err != nil || !o.Cached || o.Text != "cached-tr" {
@@ -164,5 +164,18 @@ func TestGateway_TranslateReportsUsage(t *testing.T) {
 	want := int64((100*100000 + 20*500000) / 1_000_000)
 	if o.Calls != 1 || o.CostMicros != want || o.Provider != "claude" || o.Model != "claude-haiku-5-5" || o.Usage.OutputTokens != 20 || o.Cached {
 		t.Fatalf("outcome %+v want cost %d", o, want)
+	}
+}
+
+func TestGateway_PolishCacheKeepsRisk(t *testing.T) {
+	cache := newGWCache()
+	p := &gwProvider{name: "fake-primary", poRisk: llm.RiskReview}
+	g := newTestGateway(polishCfg(), cache, newGWMeter(), nil, p)
+	if _, err := g.Polish(context.Background(), gwPolishReq("明天见。")); err != nil {
+		t.Fatal(err)
+	}
+	o, err := g.Polish(context.Background(), gwPolishReq("明天见。"))
+	if err != nil || !o.Cached || o.Risk != llm.RiskReview || p.pcalls.Load() != 1 {
+		t.Fatalf("outcome %+v err=%v calls=%d", o, err, p.pcalls.Load())
 	}
 }
