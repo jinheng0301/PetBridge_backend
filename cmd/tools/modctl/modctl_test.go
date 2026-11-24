@@ -113,6 +113,33 @@ func TestModctl_FlagsListAndAck(t *testing.T) {
 	}
 }
 
+func TestModctl_FlagsShowDeliveryTextForTranslation(t *testing.T) {
+	p := dbtest.Reset(t)
+	u := mkUser(t, p, "a", "18_plus")
+	r := mkUser(t, p, "b", "18_plus")
+	room := mkRoom(t, p, u)
+	var mid, did string
+	if err := p.QueryRow(bg, `insert into messages(id, room_id, sender_id, scope, kind, src_lang, body, client_msg_id)
+		values(gen_random_uuid(), $1, $2, 'room', 'text', 'ja', 'SOURCE-BODY', 'c1') returning id::text`, room, u).Scan(&mid); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.QueryRow(bg, `insert into deliveries(message_id, receiver_id, target_lang, base_text, translation_status)
+		values($1,$2,'en','TRANSLATED-TEXT','done') returning id::text`, mid, r).Scan(&did); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Exec(bg, `insert into mod_flags(stage, verdict, source, user_id, room_id, message_id, delivery_id)
+		values('translation','block','model',$1,$2,$3,$4)`, u, room, mid, did); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, p, "flags")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "TRANSLATED-TEXT") || strings.Contains(out, "SOURCE-BODY") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
 func TestModctl_ReportsOrderAndResolve(t *testing.T) {
 	p := dbtest.Reset(t)
 	a := mkUser(t, p, "alice", "18_plus")

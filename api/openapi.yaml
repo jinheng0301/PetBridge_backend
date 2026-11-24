@@ -581,7 +581,8 @@ paths:
       summary: Polish my copy of a message
       description: >
         The receiver's polish button. Only the delivery's receiver, still seated in the room, may call it
-        (else 404 DELIVERY_NOT_FOUND). Charges one polish to the caller and returns the view with
+        (else 404 DELIVERY_NOT_FOUND; a copy hidden by moderation, or between users with a block
+        relationship, is also 404 DELIVERY_NOT_FOUND). Charges one polish to the caller and returns the view with
         `polish_status` pending; `message.polished` follows when it ends (done, or fallback when the
         model broke a rule or every provider failed). Calling it again, or for a copy already polished,
         returns the current view and charges nothing. A phrase message or a translation that is not done

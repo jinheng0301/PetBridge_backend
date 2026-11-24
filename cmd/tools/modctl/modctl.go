@@ -82,7 +82,7 @@ func listFlags(ctx context.Context, pool *pgxpool.Pool, args []string, out io.Wr
 	}
 	rows, err := pool.Query(ctx, `
 		select f.id::text, f.created_at, f.stage, f.verdict, f.source, f.terms, f.user_id::text,
-		       coalesce(f.text, m.body, d.base_text, '')
+		       coalesce(f.text, d.base_text, m.body, '')
 		from mod_flags f
 		left join messages m on m.id = f.message_id
 		left join deliveries d on d.id = f.delivery_id

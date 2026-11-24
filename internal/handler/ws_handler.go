@@ -213,6 +213,10 @@ func (h *WsHandler) pingLoop(ctx context.Context, conn *wsConn) {
 		}
 		h.presence.Refresh(ctx, conn.user, conn.id)
 		status, _, err := h.users.State(ctx, conn.user)
+		if errors.Is(err, model.ErrNotFound) {
+			conn.Close(model.CloseAccountDisabled, "account disabled")
+			return
+		}
 		if err != nil {
 			if ctx.Err() == nil {
 				h.log.Warn("account state check failed", "user_id", conn.user, "err", err.Error())
