@@ -99,9 +99,12 @@ func main() {
 	members := repository.NewRoomMemberRepo(pool)
 	usage := repository.NewAIUsageRepo(pool)
 	q := queue.New(rdb) // shares rdb's fail-fast timeouts; rdb is closed above
+	flags := repository.NewModFlagRepo(pool)
+	blocks := repository.NewBlockRepo(pool)
 	translation := service.NewTranslationService(store, members, gw, mod, pub, time.Now, log).
-		WithUsage(usage).WithPolishQueue(q)
-	polish := service.NewPolishService(store, members, gw, mod, usage, pub, time.Now, log)
+		WithUsage(usage).WithPolishQueue(q).WithModFlags(flags).WithBlocks(blocks)
+	polish := service.NewPolishService(store, members, gw, mod, usage, pub, time.Now, log).
+		WithModFlags(flags).WithBlocks(blocks)
 	sweep := service.NewSweepService(store, q, time.Now, log).WithPolish(q, polish.GiveUp)
 
 	srv := asynq.NewServer(redisOpt, asynq.Config{

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -45,6 +46,7 @@ func main() {
 	}
 
 	log := logger.New(cfg.LogLevel, os.Stdout)
+	slog.SetDefault(log) // services that log through slog.Default() carry the configured handler
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -79,11 +81,18 @@ func main() {
 	rooms := repository.NewRoomRepo(pool)
 	members := repository.NewRoomMemberRepo(pool)
 	codes := repository.NewInviteCodeRepo(pool)
+	mod, err := service.LoadModerator()
+	if err != nil {
+		log.Error("moderation word lists unavailable", "error", err.Error())
+		os.Exit(1)
+	}
+	flags := repository.NewModFlagRepo(pool)
+	blocks := repository.NewBlockRepo(pool)
 	issuer := service.NewIssuer(cfg.JWTSigningKey, cfg.AccessTokenTTL, time.Now)
 	authSvc := service.NewAuthService(users, repository.NewAuthIdentityRepo(pool),
 		repository.NewRefreshTokenRepo(pool), tx, issuer, cfg.RefreshTokenTTL)
 	userSvc := service.NewUserService(users, rooms, members, codes, tx, cfg.CodeTTLDays, time.Now).
-		WithRoomCapacity(cfg.RoomCapacity)
+		WithRoomCapacity(cfg.RoomCapacity).WithModeration(mod, flags)
 
 	// Rate limits live in Redis and fall back to in-process counters while it is down.
 	counter := ratelimit.NewFallback(ratelimit.NewRedis(rdb), ratelimit.NewMemory(time.Now),
@@ -156,28 +165,26 @@ func main() {
 			Prices:            bootstrap.Prices(cfg),
 		}, time.Now, log)
 	msgs := repository.NewMessageRepo(pool)
-	mod, err := service.LoadModerator()
-	if err != nil {
-		log.Error("moderation word lists unavailable", "error", err.Error())
-		os.Exit(1)
-	}
 	q := queue.New(rdb) // shares rdb's fail-fast timeouts; rdb is closed above
 	// Inline translations also record usage and hand finished rows to the polish queue.
 	translation := service.NewTranslationService(msgs, members, gw, mod, pub, time.Now, log).
-		WithUsage(repository.NewAIUsageRepo(pool)).WithPolishQueue(q)
+		WithUsage(repository.NewAIUsageRepo(pool)).WithPolishQueue(q).
+		WithModFlags(flags).WithBlocks(blocks)
 	inline := service.NewInlinePool(4, translation.Process, log)
 	// Polish quota: 6 a minute and AI_POLISH_DAILY_QUOTA a local day per user, in the same
 	// Redis-with-fallback counter as the other limits; refused once today's spend reaches the budget.
 	quota := service.NewQuotaService(ratelimit.NewPolishGuard(counter, 6, cfg.AIPolishDailyQuota), meter,
 		service.QuotaConfig{Enabled: cfg.AIPolishEnabled, DailyBudgetMicros: cfg.AIDailyBudgetMicros}, time.Now)
 	chatSvc := service.NewChatService(tx, users, members, msgs, mod, q, inline, pub, time.Now, log).
-		WithPolish(quota, q)
+		WithPolish(quota, q).WithModFlags(flags).WithBlocks(blocks)
 	chatHandler := handler.NewChatHandler(chatSvc, authn,
 		middleware.RateLimitUser(counter, "msg", 20, time.Minute),
 		middleware.RateLimitUser(counter, "msgday", 1000, 24*time.Hour))
 
 	router := server.NewRouter(log, health, authHandler, userHandler, roomHandler, codeHandler,
-		handler.NewConfigHandler(authn), chatHandler, wsHandler)
+		handler.NewConfigHandler(authn), chatHandler, wsHandler,
+		handler.NewBlockHandler(service.NewBlockService(users, blocks), authn),
+		handler.NewReportHandler(service.NewReportService(users, members, repository.NewReportRepo(pool), time.Now, log), authn))
 
 	log.Info("starting api", "app_env", cfg.AppEnv, "port", cfg.AppPort)
 	if err := server.Run(ctx, net.JoinHostPort(cfg.AppHost, strconv.Itoa(cfg.AppPort)), router, log, func() { wsHandler.Shutdown(5 * time.Second) }); err != nil {

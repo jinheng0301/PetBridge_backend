@@ -50,7 +50,8 @@ func TestOpenAPI_RoutesMatchDocument(t *testing.T) {
 		handler.NewCodeHandler(nil, authn),
 		handler.NewConfigHandler(authn),
 		handler.NewChatHandler(nil, authn),
-		handler.NewWsHandler(nil, nil, nil, nil, nil, service.DefaultRealtimeConfig("0.0.0"), authn))
+		handler.NewWsHandler(nil, nil, nil, nil, nil, service.DefaultRealtimeConfig("0.0.0"), authn),
+		handler.NewBlockHandler(nil, authn), handler.NewReportHandler(nil, authn))
 
 	routes := map[string]bool{}
 	for _, ri := range r.Routes() {

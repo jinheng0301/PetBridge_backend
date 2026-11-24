@@ -211,6 +211,13 @@ paths:
         '400': { $ref: '#/components/responses/ValidationFailed' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
+        '422':
+          description: >
+            CONTENT_BLOCKED. The nickname was refused by moderation; `error.details.fields` is
+            `["nickname"]`. Not returned on repeat calls (the existing result is returned).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '500': { $ref: '#/components/responses/Internal' }
   /api/v1/rooms/join:
     post:
@@ -432,6 +439,13 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/RoomNotFound' }
+        '422':
+          description: >
+            CONTENT_BLOCKED. The text was refused by moderation and nothing was stored or sent;
+            `error.details` is absent. Phrase messages are never refused.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
         '500': { $ref: '#/components/responses/Internal' }
     get:
@@ -443,6 +457,7 @@ paths:
         newest page; `before` gives the page just before that message id, `after` the page just after
         it (use it to catch up after reconnecting); not both. `limit` defaults to 30, at most 100.
         Receivers are fixed when a message is sent, so later joiners do not see earlier messages.
+        Messages from users the caller has blocked, or who have blocked the caller, are left out.
         The caller must be seated (else 404 ROOM_NOT_FOUND). A bad cursor or limit is 400
         VALIDATION_FAILED with `error.details.fields`.
       security: [{ bearerAuth: [] }]
@@ -465,6 +480,99 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/AccountDisabled' }
         '404': { $ref: '#/components/responses/RoomNotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/blocks:
+    get:
+      operationId: listBlocks
+      tags: [safety]
+      summary: List the users the caller has blocked
+      description: Newest block first, not paged.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The caller's block list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/BlockList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      operationId: blockUser
+      tags: [safety]
+      summary: Block a user
+      description: >
+        Idempotent: blocking someone already blocked is 204 too. Blocking yourself, an unknown user
+        or one who has not finished onboarding is 400 VALIDATION_FAILED with `fields` `["user_id"]`.
+        At most 500 blocks per user (409 BLOCK_LIMIT). The other side is not told.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BlockRequest' }
+      responses:
+        '204': { description: Blocked }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: BLOCK_LIMIT. The caller already blocks 500 users.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/blocks/{user_id}:
+    delete:
+      operationId: unblockUser
+      tags: [safety]
+      summary: Remove a block
+      description: Idempotent, 204 even when the user was not blocked.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Not blocked any more }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/reports:
+    post:
+      operationId: reportUser
+      tags: [safety]
+      summary: Report a user or one of their messages
+      description: >
+        Reporter and target must both have had a seat in `room_id` (leaving does not matter) and
+        must differ. With `message_id` the message must belong to the room, be sent by the target
+        and be visible to the caller. Invalid fields are 400 VALIDATION_FAILED with
+        `error.details.fields`. Repeating a report that is still open (same target and message)
+        returns the existing one. Each user may file 20 reports per UTC day (429 RATE_LIMITED with
+        Retry-After set to the seconds until the next UTC midnight).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReportRequest' }
+      responses:
+        '201':
+          description: The report (new or the existing open one)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ReportResult' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
         '500': { $ref: '#/components/responses/Internal' }
   /api/v1/deliveries/{id}/polish:
     post:
@@ -681,7 +789,7 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
     TooManyRequests:
       description: >
-        RATE_LIMITED (too many requests from this IP or user; wait for the Retry-After header) or
+        RATE_LIMITED (too many requests from this IP or user, or more than 20 reports in a UTC day; wait for the Retry-After header) or
         CODE_COOLDOWN (too many wrong codes; wait error.details.retry_after_seconds, no header).
       headers:
         Retry-After:
@@ -727,13 +835,13 @@ components:
                 One of NOT_READY, INTERNAL, UNAUTHORIZED, VALIDATION_FAILED, ACCOUNT_DISABLED,
                 REFRESH_INVALID, REFRESH_REUSED, PROVIDER_NOT_CONFIGURED, ONBOARDING_REQUIRED,
                 CODE_INVALID, ROOM_FULL, ALREADY_MEMBER, ROOM_LIMIT, AGE_RESTRICTED, CODE_COOLDOWN,
-                RATE_LIMITED, DELIVERY_NOT_FOUND, POLISH_NOT_READY, QUOTA_EXCEEDED.
+                RATE_LIMITED, DELIVERY_NOT_FOUND, POLISH_NOT_READY, QUOTA_EXCEEDED, CONTENT_BLOCKED, BLOCK_LIMIT.
             message: { type: string, description: 'For debugging only; localise by code.' }
             request_id: { type: string }
             details:
               type: object
               description: >
-                fields on VALIDATION_FAILED from onboarding and messages; room_id on ALREADY_MEMBER;
+                fields on VALIDATION_FAILED from onboarding, messages, blocks and reports, and on CONTENT_BLOCKED from onboarding (nickname); room_id on ALREADY_MEMBER;
                 retry_after_seconds on CODE_COOLDOWN; reason on CODE_ISSUE_LIMIT and QUOTA_EXCEEDED.
               properties:
                 fields:
@@ -746,6 +854,42 @@ components:
                   description: >
                     CODE_ISSUE_LIMIT: room_full, enough_unused, daily_limit, lifetime_limit.
                     QUOTA_EXCEEDED: daily_quota, minute_limit, global_budget, disabled.
+    BlockRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: { type: string, format: uuid }
+    BlockedUser:
+      type: object
+      required: [user_id, nickname, pet_type, blocked_at]
+      properties:
+        user_id: { type: string, format: uuid }
+        nickname: { type: string, nullable: true }
+        pet_type: { type: string, nullable: true, example: happy_shiba }
+        blocked_at: { type: string, format: date-time }
+    BlockList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: Newest block first; [] when none (never null).
+          items: { $ref: '#/components/schemas/BlockedUser' }
+    ReportRequest:
+      type: object
+      required: [target_user_id, room_id, reason]
+      properties:
+        target_user_id: { type: string, format: uuid }
+        room_id: { type: string, format: uuid }
+        message_id: { type: string, format: uuid, description: 'Optional; report one message instead of the user.' }
+        reason: { type: string, enum: [harassment, spam, sexual, self_harm, minor_safety, other] }
+        note: { type: string, maxLength: 500, description: 'Optional; trimmed, at most 500 characters.' }
+    ReportResult:
+      type: object
+      required: [id, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
     IDTokenRequest:
       type: object
       required: [id_token]

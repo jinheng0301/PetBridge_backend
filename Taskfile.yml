@@ -40,6 +40,11 @@ tasks:
     cmds:
       - go run ./cmd/tools/polisheval {{.CLI_ARGS}}
 
+  modctl:
+    desc: "Moderation CLI, e.g. task modctl -- flags | reports | ban <user_id>"
+    cmds:
+      - go run ./cmd/tools/modctl {{.CLI_ARGS}}
+
   test:
     desc: Unit tests (no external services)
     cmds:
