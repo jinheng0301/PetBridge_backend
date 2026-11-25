@@ -24,7 +24,7 @@ type txKey struct{}
 // passed to fn join that transaction automatically.
 //
 // Global lock order for multi-table transactions (backend TRD 7.2):
-// users -> invite_codes -> rooms -> room_members.
+// users -> invite_codes -> rooms -> room_members -> checkins -> room_progress -> room_decor.
 type TxManager struct{ pool *pgxpool.Pool }
 
 func NewTxManager(pool *pgxpool.Pool) *TxManager { return &TxManager{pool: pool} }

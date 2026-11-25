@@ -183,6 +183,21 @@ type ReportStore interface {
 	MessageReportable(ctx context.Context, messageID, roomID, senderID, reporterID string) (bool, error)
 }
 
+// CheckinStore keeps check-ins, room energy and unlocked decorations.
+type CheckinStore interface {
+	// InsertCheckin: inserted=false when the user already checked in to the room on localDay ("2006-01-02").
+	InsertCheckin(ctx context.Context, roomID, userID, localDay string, energy int, at time.Time) (inserted bool, err error)
+	// ClaimFullHouse uses up one recent check-in of every seated active member; false when fewer than two or one is missing.
+	ClaimFullHouse(ctx context.Context, roomID string, now time.Time, window time.Duration) (claimed bool, err error)
+	AddEnergy(ctx context.Context, roomID string, delta int, at time.Time) (total int, err error)
+	Energy(ctx context.Context, roomID string) (int, error)
+	// UnlockDecor returns the items that were new, in no particular order.
+	UnlockDecor(ctx context.Context, roomID string, itemIDs []string, at time.Time) (added []string, err error)
+	ListDecor(ctx context.Context, roomID string) ([]model.DecorUnlock, error) // never nil
+	// MemberCheckins covers every seated member.
+	MemberCheckins(ctx context.Context, roomID string) ([]model.MemberCheckin, error)
+}
+
 // UsageStore records real AI calls per user and day (ai_usage_daily).
 type UsageStore interface {
 	// Add accumulates into (UTC date of day, userID, kind); calls == 0 writes nothing.

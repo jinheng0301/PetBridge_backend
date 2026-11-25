@@ -230,8 +230,8 @@ func TestMigration0003_AddsRewardForColumn(t *testing.T) {
 	if err != nil || refs != 1 {
 		t.Fatalf("self-referencing fk count=%d err=%v", refs, err)
 	}
-	// 0006 is the latest migration now: roll back 0006, 0005 and 0004 first, then 0003.
-	for i := 0; i < 4; i++ {
+	// 0007 is the latest migration now: roll back 0007, 0006, 0005 and 0004 first, then 0003.
+	for i := 0; i < 5; i++ {
 		if err := db.MigrateDown(bg, dbtest.URL()); err != nil {
 			t.Fatal(err)
 		}
