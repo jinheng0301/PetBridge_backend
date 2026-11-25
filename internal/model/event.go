@@ -1,6 +1,9 @@
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // WebSocket frame types (backend TRD chapter 9).
 const (
@@ -22,6 +25,8 @@ const (
 	FrameMessageTranslated = "message.translated"
 	FrameMessagePolished   = "message.polished"
 	FrameMessageRemoved    = "message.removed"
+	FrameCheckinUpdated    = "checkin.updated"
+	FrameDecorUnlocked     = "decor.unlocked"
 )
 
 // Presence states. Offline members are drawn as a sleeping pet by the client.
@@ -66,11 +71,28 @@ type MemberPresence struct {
 	Presence string `json:"presence"`
 }
 
-// SnapshotRoom has the shape of one GET /rooms/mine item plus presence per member.
+// SnapshotMember is a member as snapshots show them: CheckinExpiresAt is their
+// next local midnight when they have checked in today, null otherwise.
+type SnapshotMember struct {
+	MemberPresence
+	CheckinExpiresAt *time.Time `json:"checkin_expires_at"`
+}
+
+// RoomProgress is a room's energy; NextThreshold is null once every
+// decoration is unlocked.
+type RoomProgress struct {
+	EnergyTotal   int  `json:"energy_total"`
+	NextThreshold *int `json:"next_threshold"`
+}
+
+// SnapshotRoom has the shape of one GET /rooms/mine item plus presence and
+// check-in state per member, the room's energy and its unlocked decorations.
 type SnapshotRoom struct {
 	RoomSummary
-	IsOwner bool             `json:"is_owner"`
-	Members []MemberPresence `json:"members"`
+	IsOwner  bool             `json:"is_owner"`
+	Members  []SnapshotMember `json:"members"`
+	Progress RoomProgress     `json:"progress"`
+	Decor    []DecorUnlock    `json:"decor"`
 }
 
 // RoomSnapshot is the payload of room.snapshot.
