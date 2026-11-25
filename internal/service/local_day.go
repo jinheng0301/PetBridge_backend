@@ -14,5 +14,17 @@ func LocalDayBounds(now time.Time, tz *string) (from, to time.Time) {
 		}
 	}
 	y, m, d := now.In(loc).Date()
-	return time.Date(y, m, d, 0, 0, 0, 0, loc), time.Date(y, m, d+1, 0, 0, 0, 0, loc)
+	return startOfDay(y, m, d, loc), startOfDay(y, m, d+1, loc)
+}
+
+// startOfDay is the first instant of a calendar day in loc. Where clocks skip
+// midnight (Havana in spring), time.Date may land on 23:00 of the day before;
+// the day then starts at the zone change that follows.
+func startOfDay(y int, m time.Month, d int, loc *time.Location) time.Time {
+	t := time.Date(y, m, d, 0, 0, 0, 0, loc)
+	if t.Hour() == 0 || t.Day() == time.Date(y, m, d, 12, 0, 0, 0, loc).Day() {
+		return t
+	}
+	_, end := t.ZoneBounds()
+	return end
 }
