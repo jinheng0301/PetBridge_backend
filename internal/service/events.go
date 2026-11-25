@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"time"
 
 	"github.com/jinheng0301/petbridge/internal/model"
 )
@@ -18,6 +19,8 @@ const (
 	EventMessageTranslated = "message.translated"
 	EventMessagePolished   = "message.polished"
 	EventMessageRemoved    = "message.removed"
+	EventCheckinUpdated    = "checkin.updated"
+	EventDecorUnlocked     = "decor.unlocked"
 )
 
 // EventKind decides how an event is numbered and routed.
@@ -54,6 +57,23 @@ func roomKickedEvents(roomID, reason string, users []string) []Event {
 func messageRemovedEvent(roomID, messageID, to string) Event {
 	return Event{Type: EventMessageRemoved, Kind: KindTransient, RoomID: roomID, To: []string{to},
 		Data: map[string]any{"room_id": roomID, "message_id": messageID}}
+}
+
+// checkinEvents tells every seated member about a check-in and the decorations
+// it unlocked. Neither event takes a room seq: what they carry only ever
+// grows, so clients merge them in any order (B6b spec 8).
+func checkinEvents(roomID, userID string, to []string, res model.CheckinResult, unlockedAt time.Time) []Event {
+	events := []Event{{Type: EventCheckinUpdated, Kind: KindTransient, RoomID: roomID, To: to,
+		Data: map[string]any{
+			"room_id": roomID, "user_id": userID, "checkin_expires_at": res.CheckinExpiresAt,
+			"energy_total": res.EnergyTotal, "next_threshold": res.NextThreshold,
+			"energy_gained": res.EnergyGained, "bonus_gained": res.BonusGained,
+		}}}
+	for _, item := range res.Unlocked {
+		events = append(events, Event{Type: EventDecorUnlocked, Kind: KindTransient, RoomID: roomID, To: to,
+			Data: map[string]any{"room_id": roomID, "item_id": item, "unlocked_at": unlockedAt}})
+	}
+	return events
 }
 
 // Event is a realtime notification for the users in To.

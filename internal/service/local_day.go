@@ -28,3 +28,20 @@ func startOfDay(y int, m time.Month, d int, loc *time.Location) time.Time {
 	_, end := t.ZoneBounds()
 	return end
 }
+
+// LocalDay returns the calendar day containing now in tz ("2006-01-02") and
+// the next local midnight in UTC. The zone rules are LocalDayBounds' own.
+func LocalDay(now time.Time, tz *string) (day string, next time.Time) {
+	from, to := LocalDayBounds(now, tz)
+	return from.Format(time.DateOnly), to.UTC()
+}
+
+// CheckinExpiry is when a check-in on lastDay stops counting as today's: the
+// next local midnight if lastDay is today in tz, nil otherwise.
+func CheckinExpiry(now time.Time, tz, lastDay *string) *time.Time {
+	day, next := LocalDay(now, tz)
+	if lastDay == nil || *lastDay != day {
+		return nil
+	}
+	return &next
+}
