@@ -88,6 +88,7 @@ func main() {
 	}
 	flags := repository.NewModFlagRepo(pool)
 	blocks := repository.NewBlockRepo(pool)
+	checkins := repository.NewCheckinRepo(pool)
 	issuer := service.NewIssuer(cfg.JWTSigningKey, cfg.AccessTokenTTL, time.Now)
 	authSvc := service.NewAuthService(users, repository.NewAuthIdentityRepo(pool),
 		repository.NewRefreshTokenRepo(pool), tx, issuer, cfg.RefreshTokenTTL)
@@ -140,7 +141,7 @@ func main() {
 	codeHandler := handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn)
 	// Upgrades are limited per IP (generous: carrier NAT shares IPs) and per
 	// user; the socket itself closes when the access token expires.
-	wsHandler := handler.NewWsHandler(hub, presence, service.NewRealtimeService(rooms, members, presence, pub, pub),
+	wsHandler := handler.NewWsHandler(hub, presence, service.NewRealtimeService(rooms, members, presence, pub, pub).WithCheckins(checkins, time.Now),
 		users, issuer, rtCfg, authn).
 		WithUpgradeLimit(middleware.RateLimitIP(counter, "ws", 60, time.Minute),
 			middleware.RateLimitUser(counter, "ws", 20, time.Minute)).
@@ -184,7 +185,9 @@ func main() {
 	router := server.NewRouter(log, health, authHandler, userHandler, roomHandler, codeHandler,
 		handler.NewConfigHandler(authn), chatHandler, wsHandler,
 		handler.NewBlockHandler(service.NewBlockService(users, blocks), authn),
-		handler.NewReportHandler(service.NewReportService(users, members, repository.NewReportRepo(pool), time.Now, log), authn))
+		handler.NewReportHandler(service.NewReportService(users, members, repository.NewReportRepo(pool), time.Now, log), authn),
+		handler.NewCheckinHandler(service.NewCheckinService(retryTx, users, rooms, members, checkins, pub, time.Now), authn,
+			middleware.RateLimitUser(counter, "checkin", 10, time.Minute)))
 
 	log.Info("starting api", "app_env", cfg.AppEnv, "port", cfg.AppPort)
 	if err := server.Run(ctx, net.JoinHostPort(cfg.AppHost, strconv.Itoa(cfg.AppPort)), router, log, func() { wsHandler.Shutdown(5 * time.Second) }); err != nil {

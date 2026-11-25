@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: PetBridge API
-  version: 0.5.0
+  version: 0.6.0
   description: >
     B3: health probes, authentication (dev login, Apple/Google stubs, refresh, logout),
     onboarding, joining a room by invite code, listing my codes and my rooms, and room management
-    (owner removes a member, dissolves the room or issues a code; members leave), and (B5a) the phrase book and sending and listing room messages.
+    (owner removes a member, dissolves the room or issues a code; members leave), (B5a) the phrase book and sending and listing room messages, and (B6b) daily check-ins and room decorations.
     Every business path lives under /api/v1; probes do not.
     Success bodies are {"data": ...}; failures are {"error": {code, message, request_id, details?}}.
     Login routes are limited to 10 requests per minute per client IP (429 RATE_LIMITED with Retry-After).
@@ -400,6 +400,57 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/rooms/{id}/checkin:
+    post:
+      operationId: checkin
+      tags: [rooms]
+      summary: Check in to a room for today
+      description: >
+        Once per room and local day (the caller's time zone); a repeat is 200 with `already` true,
+        nothing gained and current totals. Grants 10 energy, plus 20 when every active member
+        (at least two) has an unused check-in from the last 24 hours. Energy unlocks decorations. All seated
+        members get checkin.updated and decor.unlocked over the WebSocket. At most 10 calls a minute
+        per user (429).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Checked in, or already checked in today
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/CheckinResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/Internal' }
+  /api/v1/rooms/{id}/decor:
+    get:
+      operationId: listDecor
+      tags: [rooms]
+      summary: The decoration catalog with what the room has unlocked
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The whole catalog, lowest threshold first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/DecorList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountDisabled' }
+        '404': { $ref: '#/components/responses/RoomNotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
   /api/v1/rooms/{id}/messages:
     post:
       operationId: sendMessage
@@ -667,7 +718,8 @@ paths:
       tags: [realtime]
       summary: Realtime WebSocket
       description: >
-        Upgrades to a WebSocket carrying room events (member joins and leaves, presence, pet taps).
+        Upgrades to a WebSocket carrying room events (member joins and leaves, presence, pet taps,
+        messages, check-ins and unlocked decorations).
         Send the access token in the Authorization header, never in the URL. The connection is
         closed with code 4401 when that access token expires; refresh it and reconnect at once.
         Upgrades are limited per IP and per user (429). Frames are JSON
@@ -1045,6 +1097,36 @@ components:
             in the owner's time zone, never below 0; null for rooms joined from others. Covers the daily limit
             only: room_full, enough_unused and lifetime_limit still come from POST /rooms/{id}/codes, which
             stays authoritative. Not part of room.snapshot.
+    CheckinResult:
+      type: object
+      required: [already, energy_gained, bonus_gained, checkin_expires_at, energy_total, next_threshold, unlocked]
+      properties:
+        already: { type: boolean, description: Already checked in to this room today; nothing was gained. }
+        energy_gained: { type: integer, minimum: 0 }
+        bonus_gained: { type: integer, minimum: 0, description: Full-house bonus this check-in completed. }
+        checkin_expires_at: { type: string, format: date-time, description: "The caller's next local midnight; they can check in again from then." }
+        energy_total: { type: integer, minimum: 0 }
+        next_threshold: { type: integer, nullable: true, description: Energy that unlocks the next decoration; null when all are unlocked. }
+        unlocked:
+          type: array
+          description: Item ids this check-in unlocked, in catalog order; [] when none (never null).
+          items: { type: string, example: wall_clock }
+    DecorList:
+      type: object
+      required: [energy_total, next_threshold, items]
+      properties:
+        energy_total: { type: integer, minimum: 0 }
+        next_threshold: { type: integer, nullable: true }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DecorListItem' }
+    DecorListItem:
+      type: object
+      required: [item_id, threshold, unlocked_at]
+      properties:
+        item_id: { type: string, description: Stable id; names and drawings live in the client., example: wall_clock }
+        threshold: { type: integer, minimum: 1 }
+        unlocked_at: { type: string, format: date-time, nullable: true, description: null until the room unlocks it. }
     CodeListItem:
       type: object
       required: [code, source, status, expires_at, room]

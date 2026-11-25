@@ -187,7 +187,8 @@ func newWSApp(t *testing.T, o wsOpts) *wsApp {
 	store := &memStore{conns: map[string]map[string]bool{}}
 	presence := service.NewPresenceService(store, hub, rooms, pub, cfg, time.Now)
 	pub.SetPresence(presence)
-	rt := service.NewRealtimeService(rooms, members, presence, pub, pub)
+	checkins := repository.NewCheckinRepo(pool)
+	rt := service.NewRealtimeService(rooms, members, presence, pub, pub).WithCheckins(checkins, time.Now)
 	ctx, cancel := context.WithCancel(context.Background())
 	go pub.Run(ctx)
 	<-bus.ready
@@ -209,6 +210,8 @@ func newWSApp(t *testing.T, o wsOpts) *wsApp {
 		handler.NewUserHandler(userSvc, authn),
 		handler.NewRoomHandler(joinSvc, service.NewRoomService(rooms, users, codes, 3, time.Now), authn).WithManage(manageSvc),
 		handler.NewCodeHandler(service.NewCodeService(codes, time.Now), authn),
+		handler.NewCheckinHandler(service.NewCheckinService(repository.NewTxManager(pool), users, rooms, members,
+			checkins, pub, time.Now), authn),
 		ws)
 
 	srv := httptest.NewUnstartedServer(r)
@@ -406,6 +409,53 @@ func TestWS_SubOthersRoom(t *testing.T) {
 		t.Fatalf("error %v", e.D)
 	}
 	cl.sub(s.roomID) // still usable
+}
+
+// Check-in events carry no room seq, so they never open a gap for clients
+// that do not know them.
+func TestWS_CheckinUpdatedHasNoSeq(t *testing.T) {
+	a := defaultWSApp(t)
+	o := a.onboarded(t, "o@x.test", "18_plus")
+	b := a.onboarded(t, "b@x.test", "18_plus")
+	third := a.onboarded(t, "t@x.test", "18_plus")
+	if w := a.join(b, o.code); w.Code != 200 {
+		t.Fatalf("join %d %s", w.Code, w.Body.String())
+	}
+	co, cb := a.dial(t, o.token), a.dial(t, b.token)
+	snap := co.sub(o.roomID)
+	cb.sub(o.roomID)
+
+	if w := call(a.r, "POST", "/api/v1/rooms/"+o.roomID+"/checkin", "", b.token); w.Code != 200 {
+		t.Fatalf("check-in %d %s", w.Code, w.Body.String())
+	}
+	for _, cl := range []*wsClient{co, cb} {
+		f := cl.expect("checkin.updated")
+		if f.Seq != 0 || f.D["user_id"] != b.id || f.D["energy_total"] != 10.0 || f.D["next_threshold"] != 40.0 {
+			t.Fatalf("checkin.updated %+v", f)
+		}
+		f = cl.expect("decor.unlocked")
+		if f.Seq != 0 || f.D["item_id"] != "wall_clock" {
+			t.Fatalf("decor.unlocked %+v", f)
+		}
+	}
+	code := a.extraCode(t, o, "AAAA2222")
+	if w := a.join(third, code); w.Code != 200 {
+		t.Fatalf("third join %d %s", w.Code, w.Body.String())
+	}
+	if f := co.expect("member.joined"); float64(f.Seq) != snap.D["seq"].(float64)+1 {
+		t.Fatalf("member.joined seq %d after snapshot %v", f.Seq, snap.D["seq"])
+	}
+	// The snapshot a newcomer gets shows who has checked in.
+	room := a.dial(t, third.token).sub(o.roomID).D["room"].(map[string]any)
+	if p := room["progress"].(map[string]any); p["energy_total"] != 10.0 || len(room["decor"].([]any)) != 1 {
+		t.Fatalf("snapshot %v", room)
+	}
+	for _, m := range room["members"].([]any) {
+		mm := m.(map[string]any)
+		if (mm["checkin_expires_at"] != nil) != (mm["user_id"] == b.id) {
+			t.Fatalf("member %v", mm)
+		}
+	}
 }
 
 func TestWS_JoinPushesMemberJoined(t *testing.T) {
